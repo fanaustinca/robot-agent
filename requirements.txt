@@ -1,3 +1,9 @@
 flask
 opencv-python
 lerobot
+
+# Claude agent
+anthropic
+
+# Gemini agent
+google-genai>=1.51.0
