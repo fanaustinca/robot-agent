@@ -38,7 +38,9 @@ CAMERA_WRIST_IDX = int(os.environ.get("CAM_WRIST", "0"))
 CAMERA_TOP_NAME = os.environ.get("CAM_TOP_NAME", "Logitech Webcam C930e")
 CAMERA_WRIST_NAME = os.environ.get("CAM_WRIST_NAME", "USB2.0_CAM1")
 
-# SO-101 port — override with ROBOT_PORT env var
+# SO-101 port — looked up by USB serial number at startup
+# Override with ROBOT_PORT env var or --port CLI argument if needed
+ROBOT_SERIAL = "5AE6083982"
 ROBOT_PORT = os.environ.get("ROBOT_PORT", "/dev/ttyACM0")
 
 app = Flask(__name__)
@@ -47,6 +49,18 @@ app = Flask(__name__)
 robot = None
 cameras = {}
 robot_lock = threading.Lock()
+
+def find_port_by_serial(serial_number):
+    """Find the serial port whose USB serial number matches. Returns device path or None."""
+    try:
+        import serial.tools.list_ports
+        for port in serial.tools.list_ports.comports():
+            if port.serial_number == serial_number:
+                print(f"[robot] Found serial {serial_number} at {port.device}")
+                return port.device
+    except Exception as e:
+        print(f"[robot] Serial lookup failed: {e}")
+    return None
 
 def autodetect_serial_port():
     """Return the first available ttyACM* or ttyUSB* port, or None."""
@@ -114,7 +128,11 @@ def get_motor_ids():
 
 def init_robot():
     global robot
-    port = ROBOT_PORT
+    # Priority: serial number lookup → configured port → autodetect
+    port = find_port_by_serial(ROBOT_SERIAL)
+    if port is None:
+        print(f"[robot] Serial {ROBOT_SERIAL} not found, falling back to {ROBOT_PORT}")
+        port = ROBOT_PORT
     if not os.path.exists(port):
         print(f"[robot] {port} not found, auto-detecting...")
         port = autodetect_serial_port() or ROBOT_PORT
