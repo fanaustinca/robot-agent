@@ -43,7 +43,7 @@ HOME_POSITION = {
     "gripper": 0
 }
 
-SETUP_SHOULDER_LIFT = -30  # gripper close to ground (negative = down)
+SETUP_SHOULDER_LIFT = -40  # gripper close to ground (negative = down)
 CROSSHAIR_OFFSET_Y = 38   # pixels down from center — must match robot_server.py
 CROSSHAIR_OFFSET_X = 20    # pixels right from center — must match robot_server.py
 SLOW_MOVE_STEPS = 8      # number of interpolation steps for slow moves
@@ -452,7 +452,7 @@ def run_agent():
                 # Lower arm to floor — bypass clamp so it can reach the object
                 print("      Lowering to object...")
                 start_sl = _commanded.get("shoulder_lift", 0)
-                target_sl = start_sl - 5
+                target_sl = start_sl - 20
                 # Send directly to skip SHOULDER_LIFT_MIN clamp — use more steps for slower descent
                 lower_steps = SLOW_MOVE_STEPS * 2
                 for step in range(1, lower_steps + 1):
