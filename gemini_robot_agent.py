@@ -1,206 +1,394 @@
 """
-Gemini Robot Agent
-Connects Gemini 3.1 Pro to your SO-101 arm via the robot server.
+Gemini Robot Agent — Visual Alignment Only
+
+Flow:
+  1. Move arm to home position
+  2. Open gripper
+  3. Gemini uses wrist camera to navigate to the target (alignment loop)
+  4. Close gripper
 
 Usage:
-    pip install -r requirements.txt
-    GEMINI_API_KEY=... python gemini_robot_agent.py
-
-Make sure robot_server.py is running first:
-    python robot_server.py
+    GEMINI_API_KEY=... python3 gemini_robot_agent.py
 """
 
 import base64
 import json
 import os
+import re
 import sys
+import time
 import requests
 from google import genai
 from google.genai import types
 
 ROBOT_SERVER = os.environ.get("ROBOT_SERVER", "http://localhost:7878")
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = "gemini-3.1-pro-preview"
-MAX_HISTORY_TURNS = 6  # keep last N user/assistant pairs to limit token growth
+ALIGNER_MODEL = "gemini-3-flash-preview"
+CLASSIFIER_MODEL = "gemini-3-flash-preview"
 
-SYSTEM = """You are an AI assistant controlling a SO-101 6-DOF robot arm.
+MAX_ALIGN_ITERATIONS = 10
+MIN_DELTA_START = 15  # min movement for first 5 iterations
+MIN_DELTA_STEP  = 3   # degrees to drop per iteration after iteration 5
+MAX_DELTA = 20
+ALIGN_SETTLE_DELAY = 0.6  # seconds to wait after each alignment move
+SHOULDER_LIFT_MAX =  50   # max up (agent space)
+SHOULDER_LIFT_MIN = -65   # max down — floor protection
 
-## Joints and limits
-- shoulder_pan:  rotate base left/right.  Safe range: -150 to 150 deg
-- shoulder_lift: raise/lower shoulder.    Safe range: -90 to 45 deg  (negative = raised)
-- elbow_flex:    bend elbow.              Safe range: 0 to 150 deg
-- wrist_flex:    bend wrist up/down.      Safe range: -90 to 90 deg
-- wrist_roll:    rotate wrist.            Safe range: -180 to 180 deg
-- gripper:       open/close hand.         0 = fully closed, 100 = fully open
+HOME_POSITION = {
+    "shoulder_pan": 0,
+    "shoulder_lift": 0,
+    "elbow_flex": 0,
+    "wrist_flex": 0,
+    "wrist_roll": -90,
+    "gripper": 0
+}
 
-## Cameras
-- top: overhead wide-angle view of the workspace
-- wrist: close-up view from the end of the arm, moves with the arm
-
-## Rules
-1. Before any significant movement, call confirm_move to describe your plan and get user approval.
-2. Never exceed the safe ranges listed above.
-3. Move one joint group at a time when navigating to a new position.
-4. If a move is rejected or an error occurs, stop and report back — do not retry automatically.
-5. After completing a physical task, take a wrist snapshot to confirm the outcome.
-
-## Workflow for physical tasks
-1. Call get_status to know current joint positions.
-2. Take a top snapshot to understand the scene.
-3. Call confirm_move with your plan.
-4. Execute moves incrementally.
-5. Take a wrist snapshot to verify the result."""
-
-# ---- Tool definitions ----
-FUNCTION_DECLARATIONS = [
-    types.FunctionDeclaration(
-        name="get_status",
-        description="Get the robot arm's current joint positions and check if cameras are connected.",
-        parameters=types.Schema(type=types.Type.OBJECT, properties={})
-    ),
-    types.FunctionDeclaration(
-        name="snapshot",
-        description="Take a photo from one of the robot's cameras. Use this to see what the robot sees.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "camera": types.Schema(
-                    type=types.Type.STRING,
-                    enum=["top", "wrist"],
-                    description="Which camera to use. 'top' is the overhead view, 'wrist' is mounted on the arm."
-                )
-            },
-            required=["camera"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="move_joints",
-        description="Move the robot arm joints to specific angles in degrees. Only specify the joints you want to move.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "shoulder_pan":  types.Schema(type=types.Type.NUMBER, description="Rotate base left/right (-150 to 150)"),
-                "shoulder_lift": types.Schema(type=types.Type.NUMBER, description="Raise/lower shoulder (-90 to 45)"),
-                "elbow_flex":    types.Schema(type=types.Type.NUMBER, description="Bend elbow (0 to 150)"),
-                "wrist_flex":    types.Schema(type=types.Type.NUMBER, description="Bend wrist up/down (-90 to 90)"),
-                "wrist_roll":    types.Schema(type=types.Type.NUMBER, description="Rotate wrist (-180 to 180)"),
-                "gripper":       types.Schema(type=types.Type.NUMBER, description="Open/close gripper (0=closed, 100=open)"),
-            }
-        )
-    ),
-    types.FunctionDeclaration(
-        name="move_preset",
-        description="Move the arm to a named preset position.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "pose": types.Schema(
-                    type=types.Type.STRING,
-                    enum=["home", "ready", "rest"],
-                    description="home=all zeros, ready=raised and ready to work, rest=folded down"
-                )
-            },
-            required=["pose"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="confirm_move",
-        description="Describe the move you are about to make and wait for user approval before executing it. Use this before any move_joints or move_preset call that could cause significant arm movement.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "plan": types.Schema(
-                    type=types.Type.STRING,
-                    description="Human-readable description of what you plan to do and why."
-                )
-            },
-            required=["plan"]
-        )
-    ),
-]
-
-TOOLS = [types.Tool(function_declarations=FUNCTION_DECLARATIONS)]
+SETUP_SHOULDER_LIFT = -30  # gripper close to ground (negative = down)
+CROSSHAIR_OFFSET_Y = 38   # pixels down from center — must match robot_server.py
+CROSSHAIR_OFFSET_X = 20    # pixels right from center — must match robot_server.py
+SLOW_MOVE_STEPS = 8      # number of interpolation steps for slow moves
+SLOW_MOVE_DELAY = 0.08   # seconds between steps
 
 
-# ---- Tool execution ----
-def run_tool(name, inputs):
+ALIGNER_SYSTEM = """You are navigating a robot arm gripper to a target object using camera feedback.
+
+The wrist camera image has a BLACK DOT with a crosshair drawn at its exact center.
+This dot represents where the gripper will close. Your goal is to move the gripper until the black dot is directly over the target object.
+
+Early iterations include both a top-down overview (top camera) and a close-up wrist view.
+Later iterations provide only the wrist camera.
+
+You can only command the gripper to move in one of four directions:
+- "forward"  — gripper moves toward the far end of the workspace
+- "backward" — gripper moves toward the near end of the workspace
+- "left"     — gripper moves to the left
+- "right"    — gripper moves to the right
+
+Respond with JSON only — no explanation:
+
+If the black dot crosshair is directly over the target and ready to grip:
+{"aligned": true}
+
+If movement needed (pick ONE direction per response):
+{"aligned": false, "direction": "forward", "degrees": 20}
+
+Rules:
+- Only one direction per response
+- Degrees range: 15 minimum, 15 maximum for first 3 moves then 10 maximum after that
+- Use larger degrees when the dot is far from target, smaller when nearly there
+- If the target is not visible at all, respond {"aligned": false, "lost": true}"""
+
+FORWARD_SHOULDER_RATIO  = 1.0
+BACKWARD_SHOULDER_RATIO = 1.0
+ELBOW_FORWARD_RATIO     = 1.31
+ELBOW_BACKWARD_RATIO    = 1.1
+
+TOP_WRIST_ITERATIONS = 10  # number of iterations to include both cameras
+
+# Software-tracked joint positions in agent space (avoids relying on hardware reads)
+_commanded = {
+    "shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0,
+    "wrist_flex": 0, "wrist_roll": -90, "gripper": 0
+}
+
+
+def move_joints(joints):
+    # Clamp and invert shoulder_lift: positive = up in agent logic, negative = down
+    # Clamp before inversion to enforce safe range
+    translated = {}
+    for k, v in joints.items():
+        if k == "shoulder_lift":
+            v = max(SHOULDER_LIFT_MIN, min(SHOULDER_LIFT_MAX, v))
+        _commanded[k] = v  # track commanded position in agent space
+        if k == "shoulder_lift":
+            v = -v  # invert so positive=up maps to hardware
+        translated[k] = v
     try:
-        if name == "get_status":
-            r = requests.get(f"{ROBOT_SERVER}/status", timeout=5)
-            return r.json()
-
-        elif name == "confirm_move":
-            plan = inputs.get("plan", "")
-            print(f"\n[confirm] Gemini's plan: {plan}")
-            answer = input("[confirm] Approve? (y/n): ").strip().lower()
-            if answer == "y":
-                return {"approved": True}
-            else:
-                return {"approved": False, "message": "User rejected the move. Do not proceed."}
-
-        elif name == "snapshot":
-            camera = inputs["camera"]
-            r = requests.get(f"{ROBOT_SERVER}/snapshot/{camera}", timeout=10)
-            data = r.json()
-            if "error" in data:
-                return {"error": data["error"]}
-            return {
-                "camera": camera,
-                "image_base64": data["data"],
-                "width": data["width"],
-                "height": data["height"]
-            }
-
-        elif name == "move_joints":
-            r = requests.post(f"{ROBOT_SERVER}/move", json=inputs, timeout=10)
-            return r.json()
-
-        elif name == "move_preset":
-            r = requests.post(f"{ROBOT_SERVER}/move_preset", json=inputs, timeout=10)
-            return r.json()
-
-        else:
-            return {"error": f"Unknown tool: {name}"}
-
-    except requests.exceptions.ConnectionError:
-        return {"error": f"Cannot connect to robot server at {ROBOT_SERVER}. Is robot_server.py running?"}
+        r = requests.post(f"{ROBOT_SERVER}/move", json=translated, timeout=10)
+        return r.json()
     except Exception as e:
         return {"error": str(e)}
 
 
-def build_tool_result_parts(name, result):
-    """Build Gemini content parts for a tool result, handling images specially."""
-    if name == "snapshot" and "image_base64" in result:
-        image_bytes = base64.b64decode(result["image_base64"])
-        return [
-            types.Part.from_function_response(
-                name=name,
-                response={"camera": result["camera"], "width": result["width"], "height": result["height"]}
-            ),
-            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+def hardware_to_agent(joints):
+    """Convert raw hardware joint values to agent space (inverts shoulder_lift)."""
+    result = {}
+    for k, v in joints.items():
+        clean_key = k.replace(".pos", "")
+        result[clean_key] = (-v if clean_key == "shoulder_lift" else v)
+    return result
+
+
+def get_joints_agent():
+    """Return current joint positions in agent space."""
+    return hardware_to_agent(get_joints())
+
+
+def move_joints_slow(target_joints):
+    """Interpolate from commanded positions to target over SLOW_MOVE_STEPS steps.
+    target_joints must be in agent space."""
+    start = dict(_commanded)  # snapshot of where arm currently is
+
+    for step in range(1, SLOW_MOVE_STEPS + 1):
+        t = step / SLOW_MOVE_STEPS
+        interpolated = {
+            joint: start.get(joint, 0) + (target - start.get(joint, 0)) * t
+            for joint, target in target_joints.items()
+        }
+        move_joints(interpolated)
+        time.sleep(SLOW_MOVE_DELAY)
+
+
+def get_joints():
+    try:
+        r = requests.get(f"{ROBOT_SERVER}/status", timeout=5)
+        return r.json().get("joints") or {}
+    except Exception:
+        return {}
+
+
+def get_wrist_snapshot():
+    try:
+        r = requests.get(f"{ROBOT_SERVER}/snapshot/wrist", timeout=10)
+        data = r.json()
+        if "error" in data:
+            print(f"[camera] wrist error: {data['error']}")
+            return None
+        # Draw crosshair on center so Gemini has a clear alignment reference
+        import cv2
+        import numpy as np
+        img_bytes = base64.b64decode(data["data"])
+        img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        h, w = img.shape[:2]
+        cx, cy = w // 2 + CROSSHAIR_OFFSET_X, h // 2 + CROSSHAIR_OFFSET_Y
+        # Black dot with white border for visibility
+        cv2.circle(img, (cx, cy), 10, (255, 255, 255), -1)
+        cv2.circle(img, (cx, cy), 7,  (0, 0, 0),       -1)
+        cv2.line(img, (cx - 20, cy), (cx + 20, cy), (0, 0, 0), 2)
+        cv2.line(img, (cx, cy - 20), (cx, cy + 20), (0, 0, 0), 2)
+        _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        return base64.b64encode(buf.tobytes()).decode("utf-8")
+    except Exception as e:
+        print(f"[camera] wrist exception: {e}")
+        return None
+
+
+def is_pickup_prompt(client, text):
+    """Use a cheap Gemini model to classify whether the prompt is a pick-up request."""
+    try:
+        response = client.models.generate_content(
+            model=CLASSIFIER_MODEL,
+            contents=f'Is this a request to pick up, grab, or retrieve a physical object? Reply with only "yes" or "no".\n\n"{text}"'
+        )
+        return response.text.strip().lower().startswith("yes")
+    except Exception as e:
+        print(f"[classify] Error: {e} — falling back to free mode")
+        return False
+
+
+def get_top_snapshot():
+    try:
+        r = requests.get(f"{ROBOT_SERVER}/snapshot/top", timeout=10)
+        data = r.json()
+        if "error" in data:
+            return None
+        return data["data"]
+    except Exception:
+        return None
+
+
+FREE_SYSTEM = """You are an assistant controlling a SO-101 robot arm via a local HTTP API.
+Available actions you can take by outputting a JSON command block:
+
+Move joints (degrees):
+{"action": "move", "joints": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0}}
+
+Move to preset pose (home / ready / rest):
+{"action": "preset", "pose": "home"}
+
+Open gripper:
+{"action": "move", "joints": {"gripper": 100}}
+
+Close gripper:
+{"action": "move", "joints": {"gripper": 0}}
+
+Get status (ask to check joints):
+{"action": "status"}
+
+Request wrist camera snapshot:
+{"action": "snapshot", "camera": "wrist"}
+
+If you want to take an action, include a JSON block in your response.
+If no action is needed, just respond naturally.
+Always explain what you are doing."""
+
+
+def run_free_agent(client, user_input):
+    """Let Gemini freely control the robot for non-pickup prompts."""
+    print("\n[free] Running free-form agent mode\n")
+
+    # Build message with a top camera snapshot for context
+    image_b64 = get_top_snapshot()
+    parts = []
+    if image_b64:
+        parts.append(types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg"))
+        print("[free] Attached top camera snapshot")
+
+    # Include current joint state
+    joints = get_joints_agent()
+    context = f"Current joint positions: {joints}\n\nUser: {user_input}"
+    parts.append(types.Part.from_text(text=context))
+
+    response = client.models.generate_content(
+        model=ALIGNER_MODEL,
+        contents=[types.Content(role="user", parts=parts)],
+        config=types.GenerateContentConfig(system_instruction=FREE_SYSTEM)
+    )
+
+    print(f"Gemini: {response.text}\n")
+
+    # Parse and execute any action in the response
+    match = re.search(r'\{.*\}', response.text, re.DOTALL)
+    if not match:
+        return
+
+    try:
+        cmd = json.loads(match.group())
+    except json.JSONDecodeError:
+        return
+
+    action = cmd.get("action")
+    if action == "move":
+        joints_cmd = cmd.get("joints", {})
+        print(f"[free] Moving: {joints_cmd}")
+        move_joints(joints_cmd)
+    elif action == "preset":
+        pose = cmd.get("pose", "home")
+        print(f"[free] Moving to preset: {pose}")
+        requests.post(f"{ROBOT_SERVER}/move_preset", json={"pose": pose}, timeout=10)
+    elif action == "status":
+        print(f"[free] Status: {get_joints()}")
+    elif action == "snapshot" and cmd.get("camera") == "wrist":
+        print("[free] Gemini requested wrist snapshot, fetching...")
+        wrist_b64 = get_wrist_snapshot()
+        if not wrist_b64:
+            print("[free] Could not get wrist snapshot")
+            return
+        followup_parts = [
+            types.Part.from_bytes(data=base64.b64decode(wrist_b64), mime_type="image/jpeg"),
+            types.Part.from_text(text="[Wrist camera snapshot as requested]")
         ]
-    else:
-        return [types.Part.from_function_response(name=name, response=result)]
+        followup = client.models.generate_content(
+            model=ALIGNER_MODEL,
+            contents=[types.Content(role="user", parts=followup_parts)],
+            config=types.GenerateContentConfig(system_instruction=FREE_SYSTEM)
+        )
+        print(f"Gemini: {followup.text}\n")
 
 
-# ---- Main agent loop ----
+def visual_align(client, target_description):
+    """Navigate arm to target using wrist camera feedback. Returns True when aligned."""
+    print(f"\n[align] Navigating to: {target_description}")
+    print(f"[align] Max {MAX_ALIGN_ITERATIONS} iterations, min move starts at {MIN_DELTA_START}° dropping by {MIN_DELTA_STEP}° after iter 5\n")
+
+    for i in range(MAX_ALIGN_ITERATIONS):
+        use_top = i < TOP_WRIST_ITERATIONS
+        print(f"[align] Iteration {i + 1}/{MAX_ALIGN_ITERATIONS} ({'top+wrist' if use_top else 'wrist only'})")
+
+        wrist_b64 = get_wrist_snapshot()
+        if not wrist_b64:
+            print("[align] Could not get wrist snapshot")
+            return False
+
+        parts = []
+        if use_top:
+            top_b64 = get_top_snapshot()
+            if top_b64:
+                parts.append(types.Part.from_bytes(data=base64.b64decode(top_b64), mime_type="image/jpeg"))
+                parts.append(types.Part.from_text(text="[Top camera — overview]"))
+
+        parts.append(types.Part.from_bytes(data=base64.b64decode(wrist_b64), mime_type="image/jpeg"))
+        parts.append(types.Part.from_text(text=f"[Wrist camera — the black dot crosshair marks the gripper center]\nTarget: {target_description}\nIs the black dot crosshair directly over the target? If not, which direction should the gripper move?"))
+
+        response = client.models.generate_content(
+            model=ALIGNER_MODEL,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.GenerateContentConfig(system_instruction=ALIGNER_SYSTEM)
+        )
+
+        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if not match:
+            print("[align] Could not parse response, skipping")
+            continue
+
+        try:
+            result = json.loads(match.group())
+        except json.JSONDecodeError:
+            continue
+
+        if result.get("aligned"):
+            print(f"[align] Target reached after {i + 1} iteration(s)")
+            return True
+
+        if result.get("lost"):
+            print("[align] Target not visible — stopping")
+            return False
+
+        direction = result.get("direction")
+        if not direction:
+            print("[align] No direction — assuming aligned")
+            return True
+
+        # Clamp degrees
+        max_delta = 15 if i < 3 else (5 if i >= MAX_ALIGN_ITERATIONS - 2 else 10)
+        degrees = result.get("degrees", 5)
+        degrees = min(max_delta, float(degrees))
+
+        def cur(joint):
+            return _commanded.get(joint, 0)
+
+        if direction == "forward":
+            new_pos = {
+                "shoulder_lift": cur("shoulder_lift") - degrees * FORWARD_SHOULDER_RATIO,
+                "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_FORWARD_RATIO,
+            }
+        elif direction == "backward":
+            new_pos = {
+                "shoulder_lift": cur("shoulder_lift") + degrees * BACKWARD_SHOULDER_RATIO,
+                "elbow_flex":    cur("elbow_flex")    + degrees * ELBOW_BACKWARD_RATIO,
+            }
+        elif direction == "left":
+            new_pos = {"shoulder_pan": cur("shoulder_pan") - degrees}
+        elif direction == "right":
+            new_pos = {"shoulder_pan": cur("shoulder_pan") + degrees}
+        else:
+            print(f"[align] Unknown direction '{direction}', skipping")
+            continue
+
+        print(f"[align] Moving {direction} {degrees:.0f}°")
+        move_joints_slow(new_pos)
+        time.sleep(ALIGN_SETTLE_DELAY)
+
+    print("[align] Max iterations reached")
+    return True
+
+
 def run_agent():
     if not API_KEY:
         print("ERROR: Set GEMINI_API_KEY environment variable")
         sys.exit(1)
 
     client = genai.Client(api_key=API_KEY)
-    config = types.GenerateContentConfig(system_instruction=SYSTEM, tools=TOOLS)
-    history = []
 
     print("=" * 50)
     print("SO-101 Gemini Robot Agent")
-    print(f"Robot server: {ROBOT_SERVER}")
-    print(f"Model: {MODEL}")
+    print(f"Model:  {ALIGNER_MODEL}")
+    print(f"Server: {ROBOT_SERVER}")
+    print(f"Stream: http://localhost:7878/stream")
     print("Type 'quit' to exit")
     print("=" * 50)
 
-    # Quick connectivity check
     try:
         r = requests.get(f"{ROBOT_SERVER}/status", timeout=3)
         status = r.json()
@@ -208,8 +396,8 @@ def run_agent():
         print(f"  Cameras: {status.get('cameras', [])}")
         print(f"  Arm: {'connected' if status.get('robot_connected') else 'NOT connected (camera-only mode)'}")
     except Exception:
-        print(f"⚠ WARNING: Cannot reach robot server at {ROBOT_SERVER}")
-        print("  Start robot_server.py first!")
+        print(f"⚠  WARNING: Cannot reach robot server at {ROBOT_SERVER}")
+        print("   Start robot_server.py first!")
     print()
 
     while True:
@@ -225,60 +413,95 @@ def run_agent():
             print("Goodbye!")
             break
 
-        # Inject current joint state as context prefix
-        joint_context = ""
-        try:
-            r = requests.get(f"{ROBOT_SERVER}/status", timeout=3)
-            joints = r.json().get("joints") or {}
-            if joints:
-                joint_str = ", ".join(f"{k}: {v:.1f}" for k, v in joints.items())
-                joint_context = f"[Current joint positions: {joint_str}]\n\n"
-        except Exception:
-            pass
+        print("[classify] Detecting intent...")
+        if is_pickup_prompt(client, user_input):
+            # Step 1: Move to home (slow to avoid shaking)
+            print("\n[1/4] Moving to home position...")
+            move_joints(HOME_POSITION)          # direct send — arm may have been moved manually
+            _commanded.update(HOME_POSITION)    # sync tracking to known state
+            time.sleep(1.5)                     # wait for arm to settle
+            print("      Done.")
 
-        history.append(types.Content(
-            role="user",
-            parts=[types.Part.from_text(f"{joint_context}{user_input}")]
-        ))
+            # Step 2: Open gripper
+            print("[2/4] Opening gripper...")
+            move_joints({"gripper": 100})
+            print("      Done.")
 
-        # Trim history to last MAX_HISTORY_TURNS user/assistant pairs
-        if len(history) > MAX_HISTORY_TURNS * 2:
-            history = history[-(MAX_HISTORY_TURNS * 2):]
+            # Step 3: Lower arm for easier alignment (slow)
+            print(f"[3/5] Lowering arm (shoulder_lift: {SETUP_SHOULDER_LIFT}°, slow)...")
+            move_joints_slow({"shoulder_lift": SETUP_SHOULDER_LIFT})
+            print("      Done.")
 
-        # Agentic loop — keep going until Gemini stops using tools
-        while True:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=history,
-                config=config
-            )
+            # Step 4: Visual alignment
+            print("[4/5] Starting visual alignment...")
+            aligned = visual_align(client, user_input)
 
-            candidate = response.candidates[0]
-            history.append(candidate.content)
+            if not aligned:
+                print("\n[align] Could not reach target.")
+                try:
+                    requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": False}, timeout=5)
+                    print("      Torque disabled — move arm back manually.\n")
+                except Exception:
+                    pass
+                continue
 
-            text_parts = [p.text for p in candidate.content.parts if hasattr(p, "text") and p.text]
-            function_calls = [p.function_call for p in candidate.content.parts if p.function_call]
-
-            if text_parts:
-                print(f"\nGemini: {''.join(text_parts)}")
-
-            if not function_calls:
-                break
-
-            # Execute tools and collect results
-            tool_result_parts = []
-            for fc in function_calls:
-                print(f"\n[tool] {fc.name}({json.dumps(dict(fc.args))})")
-                result = run_tool(fc.name, dict(fc.args))
-                if "error" not in result:
-                    print(f"[tool] ✓ {fc.name} done")
+            # Step 5: Confirm and close gripper
+            print("\n[5/5] Ready to grip.")
+            confirm = input("      Close gripper? (y/n): ").strip().lower()
+            if confirm == "y":
+                # Lower arm to floor — bypass clamp so it can reach the object
+                print("      Lowering to object...")
+                start_sl = _commanded.get("shoulder_lift", 0)
+                target_sl = start_sl - 5
+                # Send directly to skip SHOULDER_LIFT_MIN clamp — use more steps for slower descent
+                lower_steps = SLOW_MOVE_STEPS * 2
+                for step in range(1, lower_steps + 1):
+                    t = step / lower_steps
+                    sl = start_sl + (target_sl - start_sl) * t
+                    try:
+                        requests.post(f"{ROBOT_SERVER}/move", json={"shoulder_lift": -sl}, timeout=10)
+                    except Exception:
+                        pass
+                    time.sleep(SLOW_MOVE_DELAY)
+                print("      Waiting before grip...")
+                time.sleep(1.0)
+                # Re-enable torque in case servo stalled against the floor
+                try:
+                    requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": True}, timeout=5)
+                except Exception:
+                    pass
+                print("      Closing gripper...")
+                # Close gripper slowly — retry each step if servo errors from stall
+                for step in range(1, SLOW_MOVE_STEPS + 1):
+                    t = step / SLOW_MOVE_STEPS
+                    g = 100 - 100 * t  # from open (100) to closed (0)
+                    for _ in range(3):  # retry up to 3 times per step
+                        try:
+                            requests.post(f"{ROBOT_SERVER}/move", json={"gripper": g}, timeout=10)
+                            break
+                        except Exception:
+                            time.sleep(0.1)
+                    time.sleep(SLOW_MOVE_DELAY)
+                _commanded["gripper"] = 0
+                print("      Gripper closed. Waiting...")
+                time.sleep(3.0)
+                print("      Lifting arm...")
+                move_joints_slow({"shoulder_lift": _commanded.get("shoulder_lift", 0) + 30})
+                print("      Done.")
+            else:
+                print("      Skipped.")
+            # Disable torque so arm can be moved manually back to home
+            try:
+                r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": False}, timeout=5)
+                result = r.json()
+                if result.get("ok"):
+                    print("      Torque disabled — move arm back manually.\n")
                 else:
-                    print(f"[tool] ✗ {result['error']}")
-                tool_result_parts.extend(build_tool_result_parts(fc.name, result))
-
-            history.append(types.Content(role="user", parts=tool_result_parts))
-
-        print()
+                    print(f"      Torque disable failed: {result}\n")
+            except Exception as e:
+                print(f"      Torque disable error: {e}\n")
+        else:
+            run_free_agent(client, user_input)
 
 
 if __name__ == "__main__":

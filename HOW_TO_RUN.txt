@@ -1,0 +1,44 @@
+SO-101 Gemini Robot Agent — How to Run
+=======================================
+
+REQUIREMENTS
+------------
+- GEMINI_API_KEY must be set as an environment variable
+- SO-101 arm connected via USB (default: /dev/ttyACM1)
+- Top camera on index 2, wrist camera on index 4
+  (server will auto-detect if these are not found)
+
+
+STEP 1 — Install dependencies (first time only)
+------------------------------------------------
+cd ~/Downloads/robot-agent-gemini-version
+pip3 install -r requirements.txt
+
+
+STEP 2 — Start the robot server (Terminal 1)
+--------------------------------------------
+cd ~/Downloads/robot-agent-gemini-version
+python3 robot_server.py
+
+Wait until you see:
+  [boot] Server running on http://0.0.0.0:7878
+  [camera] top camera opened ...
+  [camera] wrist camera opened ...
+
+
+STEP 3 — Start the Gemini agent (Terminal 2)
+--------------------------------------------
+cd ~/Downloads/robot-agent-gemini-version
+python3 gemini_robot_agent.py
+
+You can now chat with Gemini to control the arm.
+Type 'quit' to exit.
+
+
+TROUBLESHOOTING
+---------------
+- "Cannot reach robot server" — make sure Step 2 is running first
+- Cameras not found — server will auto-detect, check terminal output for indices
+- Robot arm not found — server will auto-detect available serial ports
+- To manually override devices:
+    CAM_TOP=0 CAM_WRIST=1 ROBOT_PORT=/dev/ttyUSB0 python3 robot_server.py
