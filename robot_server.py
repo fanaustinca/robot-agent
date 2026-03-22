@@ -87,17 +87,26 @@ def autodetect_cameras():
     return found
 
 def get_motor_ids():
-    """Extract integer motor IDs from the bus, handling [model, id] list format."""
+    """Extract integer motor IDs from the bus, handling various lerobot formats."""
+    def flatten_ints(val):
+        """Recursively extract all integers from a value."""
+        if isinstance(val, int):
+            return [val]
+        if isinstance(val, (list, tuple)):
+            result = []
+            for x in val:
+                result += flatten_ints(x)
+            return result
+        return []
+
     if hasattr(robot.bus, 'motor_ids'):
-        return list(robot.bus.motor_ids)
+        ids = flatten_ints(list(robot.bus.motor_ids))
+        if ids:
+            return ids
     if hasattr(robot.bus, 'motors'):
         ids = []
         for v in robot.bus.motors.values():
-            if isinstance(v, (list, tuple)):
-                # Values are [model_name, id] — grab only the int
-                ids += [x for x in v if isinstance(x, int)]
-            elif isinstance(v, int):
-                ids.append(v)
+            ids += flatten_ints(v)
         if ids:
             return ids
     return list(range(1, 7))  # SO-101 fallback: servos 1-6
@@ -118,9 +127,8 @@ def init_robot():
         print(f"[robot] Connected to SO-101 on {port}")
         # Enable torque so servos respond to position commands
         try:
-            ids = get_motor_ids()
-            robot.bus.write("Torque_Enable", [1] * len(ids), ids)
-            print(f"[robot] Torque enabled on {len(ids)} servos")
+            robot.bus.enable_torque()
+            print(f"[robot] Torque enabled")
         except Exception as te:
             print(f"[robot] Torque enable failed: {te} — arm may not move")
     except Exception as e:
@@ -326,10 +334,11 @@ def enable():
     data = request.json or {}
     enabled = data.get("enabled", True)
     try:
-        val = 1 if enabled else 0
         with robot_lock:
-            ids = get_motor_ids()
-            robot.bus.write("Torque_Enable", [val] * len(ids), ids)
+            if enabled:
+                robot.bus.enable_torque()
+            else:
+                robot.bus.disable_torque()
         return jsonify({"ok": True, "torque_enabled": enabled})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

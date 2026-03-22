@@ -408,6 +408,57 @@ def run_agent():
             print("Goodbye!")
             break
 
+        # ---- Direct commands (no AI) ----
+        if user_input.startswith("/"):
+            parts = user_input.split()
+            cmd = parts[0].lower()
+
+            if cmd == "/torque-h":
+                print("/torque-on   — enable torque (servos hold position)")
+                print("/torque-off  — disable torque (move arm freely by hand)")
+
+            elif cmd == "/move-h":
+                print("/move <joint> <degrees>  — move a single joint to the given angle")
+                print("  Joints:  shoulder_pan | shoulder_lift | elbow_flex | wrist_flex | wrist_roll | gripper")
+                print("  Example: /move shoulder_lift -30")
+                print("  Example: /move gripper 100")
+
+            elif cmd == "/torque-on":
+                try:
+                    r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": True}, timeout=5)
+                    print("[torque] ON" if r.json().get("ok") else f"[torque] Error: {r.json()}")
+                except Exception as e:
+                    print(f"[torque] Error: {e}")
+
+            elif cmd == "/torque-off":
+                try:
+                    r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": False}, timeout=5)
+                    print("[torque] OFF" if r.json().get("ok") else f"[torque] Error: {r.json()}")
+                except Exception as e:
+                    print(f"[torque] Error: {e}")
+
+            elif cmd == "/move":
+                if len(parts) != 3:
+                    print("[move] Usage: /move <joint> <degrees>")
+                    print("       Joints: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper")
+                else:
+                    joint, deg = parts[1], parts[2]
+                    try:
+                        deg = float(deg)
+                        result = move_joints({joint: deg})
+                        if "error" in result:
+                            print(f"[move] Error: {result['error']}")
+                        else:
+                            print(f"[move] {joint} → {deg}°")
+                    except ValueError:
+                        print(f"[move] Invalid degree value: {parts[2]}")
+
+            else:
+                print(f"Unknown command: {cmd}")
+                print("Commands: /torque-on  /torque-off  /move <joint> <degrees>")
+                print("Help:     /torque-h   /move-h")
+            continue
+
         print("[classify] Checking for pickup keywords...")
         if is_pickup_prompt(client, user_input):
             # Step 1: Move to home (slow to avoid shaking)
