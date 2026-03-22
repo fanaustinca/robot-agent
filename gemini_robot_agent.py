@@ -174,17 +174,12 @@ def get_wrist_snapshot():
         return None
 
 
+PICKUP_KEYWORDS = ["pick up", "pickup", "grab", "retrieve", "get", "fetch", "take", "lift", "collect"]
+
 def is_pickup_prompt(client, text):
-    """Use a cheap Gemini model to classify whether the prompt is a pick-up request."""
-    try:
-        response = client.models.generate_content(
-            model=CLASSIFIER_MODEL,
-            contents=f'Is this a request to pick up, grab, or retrieve a physical object? Reply with only "yes" or "no".\n\n"{text}"'
-        )
-        return response.text.strip().lower().startswith("yes")
-    except Exception as e:
-        print(f"[classify] Error: {e} — falling back to free mode")
-        return False
+    """Check if the prompt contains pickup-related keywords."""
+    lower = text.lower()
+    return any(kw in lower for kw in PICKUP_KEYWORDS)
 
 
 def get_top_snapshot():
@@ -413,7 +408,7 @@ def run_agent():
             print("Goodbye!")
             break
 
-        print("[classify] Detecting intent...")
+        print("[classify] Checking for pickup keywords...")
         if is_pickup_prompt(client, user_input):
             # Step 1: Move to home (slow to avoid shaking)
             print("\n[1/4] Moving to home position...")

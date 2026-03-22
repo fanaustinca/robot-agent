@@ -14,6 +14,7 @@ Endpoints:
     POST /enable              - enable/disable torque {"enabled": true/false}
 """
 
+import argparse
 import base64
 import json
 import os
@@ -335,7 +336,14 @@ def enable():
 
 # ---- Main ----
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", default=None, help="Serial port for robot (default: /dev/ttyACM0)")
+    args = parser.parse_args()
+    if args.port:
+        ROBOT_PORT = args.port
+
     print("[boot] Starting SO-101 Robot Agent Server...")
+    print(f"[boot] Robot port: {ROBOT_PORT}")
     init_robot()
     init_cameras()
     print(f"[boot] Server running on http://0.0.0.0:{PORT}")

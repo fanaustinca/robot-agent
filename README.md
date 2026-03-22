@@ -26,6 +26,8 @@ Two components run together:
 - Gemini gets a top camera snapshot + current joint state
 - Responds with a JSON action to move joints, use a preset, or check status
 
+> Intent detection uses keyword matching (pick up, grab, retrieve, get, fetch, take, lift, collect) — no extra API call needed.
+
 ## Quick Start
 
 **Step 1 — Install dependencies (first time only):**
@@ -36,6 +38,11 @@ pip install -r requirements.txt
 **Step 2 — Start the robot server (Terminal 1):**
 ```bash
 python3 robot_server.py
+```
+
+Defaults to `/dev/ttyACM0`. Override with `--port`:
+```bash
+python3 robot_server.py --port /dev/ttyACM1
 ```
 
 Wait until you see:
@@ -62,6 +69,10 @@ Type `quit` to exit.
 ## Custom camera indices / serial port
 
 ```bash
+# via command-line argument (recommended)
+python3 robot_server.py --port /dev/ttyACM1
+
+# via environment variables
 CAM_TOP=0 CAM_WRIST=1 ROBOT_PORT=/dev/ttyUSB0 python3 robot_server.py
 ```
 
