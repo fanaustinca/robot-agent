@@ -15,11 +15,37 @@ import base64
 import json
 import os
 import re
+import select
 import sys
 import time
 import requests
 from google import genai
 from google.genai import types
+
+# ---- Terminal Colors ----
+class C:
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+# ---- Joint Name Aliases ----
+JOINT_ALIASES = {
+    "sp": "shoulder_pan", "pan": "shoulder_pan",
+    "sl": "shoulder_lift", "lift": "shoulder_lift",
+    "ef": "elbow_flex", "elbow": "elbow_flex",
+    "wf": "wrist_flex", "flex": "wrist_flex",
+    "wr": "wrist_roll", "roll": "wrist_roll",
+    "g": "gripper", "grip": "gripper",
+}
+
+def resolve_joint(name):
+    """Resolve a joint alias to its full name."""
+    return JOINT_ALIASES.get(name.lower(), name.lower())
 
 ROBOT_SERVER = os.environ.get("ROBOT_SERVER", "http://localhost:7878")
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -40,12 +66,35 @@ HOME_POSITION = {
     "elbow_flex": 0,
     "wrist_flex": 0,
     "wrist_roll": -90,
+    "gripper": 0,
+}
+
+DEFAULT_POSITION = {
+    "shoulder_pan": 0,
+    "shoulder_lift": 0,
+    "elbow_flex": 0,
+    "wrist_flex": 0,
+    "wrist_roll": 0,
+    "gripper": 0,
+}
+
+# Drop position (agent space — shoulder_lift inverted from hardware 10.46)
+DROP_POSITION = {
+    "shoulder_pan": -47.08,
+    "shoulder_lift": -10.46,
+    "elbow_flex": -12.44,
+    "wrist_flex": 86.20,
+    "wrist_roll": -94.64,
     "gripper": 0
 }
 
 SETUP_SHOULDER_LIFT = -40  # gripper close to ground (negative = down)
+CALIB_STEP = 1.0          # degrees per calibration step
+CALIB_DELAY = 0.15        # seconds between calibration steps
+CALIB_STALL_THRESHOLD = 3.0  # if actual vs commanded differs by this much, we hit floor
+CALIB_LIFT_OFFSET = 5     # degrees to raise off floor before gripping
 CROSSHAIR_OFFSET_Y = 38   # pixels down from center — must match robot_server.py
-CROSSHAIR_OFFSET_X = 20    # pixels right from center — must match robot_server.py
+CROSSHAIR_OFFSET_X = 30    # pixels right from center — must match robot_server.py
 SLOW_MOVE_STEPS = 8      # number of interpolation steps for slow moves
 SLOW_MOVE_DELAY = 0.08   # seconds between steps
 
@@ -76,20 +125,90 @@ Rules:
 - Only one direction per response
 - Degrees range: 15 minimum, 15 maximum for first 3 moves then 10 maximum after that
 - Use larger degrees when the dot is far from target, smaller when nearly there
-- If the target is not visible at all, respond {"aligned": false, "lost": true}"""
+- If the target is not visible, make your best guess on which direction to move to find it"""
 
 FORWARD_SHOULDER_RATIO  = 1.0
 BACKWARD_SHOULDER_RATIO = 1.0
-ELBOW_FORWARD_RATIO     = 1.31
-ELBOW_BACKWARD_RATIO    = 1.1
+ELBOW_FORWARD_RATIO     = 1.5
+ELBOW_BACKWARD_RATIO    = 1.3
 
 TOP_WRIST_ITERATIONS = 10  # number of iterations to include both cameras
+
+PRESCAN_SYSTEM = """You are looking at a top-down camera view of a robot arm workspace (a flat board).
+The robot gripper starts at the center of the board when at home position.
+
+Given a target object description, estimate how far the gripper needs to move from center to reach the target:
+- "left" / "right" in degrees of shoulder_pan (negative = left, positive = right). Range: roughly -45 to 45.
+- "forward" / "backward" in degrees (positive = forward/away from robot, negative = backward/toward robot). Range: roughly -30 to 30.
+
+Respond with JSON only — no explanation:
+{"pan_degrees": 0, "forward_degrees": 0}
+
+Examples:
+- Object at center: {"pan_degrees": 0, "forward_degrees": 0}
+- Object far left and slightly forward: {"pan_degrees": -30, "forward_degrees": 10}
+- Object to the right and far away: {"pan_degrees": 20, "forward_degrees": 25}
+
+Be conservative — it's better to undershoot than overshoot. The fine alignment loop will correct small errors."""
+FREE_MODE_CAMERA = "top"   # default camera for free-form mode: "top" or "wrist"
 
 # Software-tracked joint positions in agent space (avoids relying on hardware reads)
 _commanded = {
     "shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0,
     "wrist_flex": 0, "wrist_roll": -90, "gripper": 0
 }
+
+
+def push_state(phase, detail="", align_iteration=0, align_max=0, confirm_pending=False):
+    """Push agent activity state to the server dashboard."""
+    try:
+        requests.post(f"{ROBOT_SERVER}/agent_state", json={
+            "phase": phase,
+            "detail": detail,
+            "align_iteration": align_iteration,
+            "align_max": align_max,
+            "confirm_pending": confirm_pending,
+        }, timeout=2)
+    except Exception:
+        pass
+
+
+def wait_for_confirm(prompt, timeout=5, default="y"):
+    """Wait for confirmation from either terminal (timed_confirm) or dashboard.
+    Dashboard confirm takes priority if received before terminal timeout."""
+    # Tell dashboard we're waiting
+    push_state("waiting_confirm", prompt, confirm_pending=True)
+    print(f"{prompt} {C.DIM}(auto-{default} in {timeout}s, or confirm via dashboard){C.RESET} ", end="", flush=True)
+
+    start = time.time()
+    buf = ""
+    while time.time() - start < timeout:
+        remaining = int(timeout - (time.time() - start)) + 1
+        print(f"\r{prompt} {C.DIM}(auto-{default} in {remaining}s){C.RESET} ", end="", flush=True)
+
+        # Check dashboard confirm
+        try:
+            r = requests.get(f"{ROBOT_SERVER}/status", timeout=1)
+            agent = r.json().get("agent", {})
+            cr = agent.get("confirm_result")
+            if cr is not None:
+                print(f"\n{C.CYAN}[dashboard]{C.RESET} Received: {cr}")
+                push_state("waiting_confirm", confirm_pending=False)
+                return cr
+        except Exception:
+            pass
+
+        # Check terminal input
+        if select.select([sys.stdin], [], [], 0.3)[0]:
+            buf = sys.stdin.readline().strip().lower()
+            break
+
+    print()
+    push_state("waiting_confirm", confirm_pending=False)
+    if buf:
+        return buf
+    print(f"{C.DIM}      Auto-confirmed.{C.RESET}")
+    return default
 
 
 def move_joints(joints):
@@ -167,6 +286,26 @@ def get_wrist_snapshot():
         cv2.circle(img, (cx, cy), 7,  (0, 0, 0),       -1)
         cv2.line(img, (cx - 20, cy), (cx + 20, cy), (0, 0, 0), 2)
         cv2.line(img, (cx, cy - 20), (cx, cy + 20), (0, 0, 0), 2)
+        # Degree scale ruler (10° ≈ 80px)
+        px_per_deg = 8
+        ruler_y = h - 14
+        ruler_cx = w // 2
+        ruler_half = px_per_deg * 10
+        cv2.line(img, (ruler_cx - ruler_half, ruler_y), (ruler_cx + ruler_half, ruler_y), (200, 100, 255), 1)
+        for deg in range(-10, 11):
+            x = ruler_cx + deg * px_per_deg
+            if deg % 10 == 0:
+                tick_h, thickness = 8, 2
+            elif deg % 5 == 0:
+                tick_h, thickness = 5, 1
+            else:
+                tick_h, thickness = 3, 1
+            cv2.line(img, (x, ruler_y - tick_h), (x, ruler_y), (200, 100, 255), thickness)
+        cv2.putText(img, "10", (ruler_cx - ruler_half - 4, ruler_y - 10), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
+        cv2.putText(img, "5", (ruler_cx - px_per_deg * 5 - 3, ruler_y - 6), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
+        cv2.putText(img, "0", (ruler_cx - 3, ruler_y - 10), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
+        cv2.putText(img, "5", (ruler_cx + px_per_deg * 5 - 3, ruler_y - 6), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
+        cv2.putText(img, "10", (ruler_cx + ruler_half - 4, ruler_y - 10), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
         _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
         return base64.b64encode(buf.tobytes()).decode("utf-8")
     except Exception as e:
@@ -174,12 +313,189 @@ def get_wrist_snapshot():
         return None
 
 
-PICKUP_KEYWORDS = ["pick up", "pickup", "grab", "retrieve", "get", "fetch", "take", "lift", "collect"]
+PICKUP_KEYWORDS = ["pick up", "pickup", "grab", "retrieve", "fetch", "collect"]
+# "get", "take", "lift" removed — too many false positives ("get status", "take a photo")
 
 def is_pickup_prompt(client, text):
     """Check if the prompt contains pickup-related keywords."""
     lower = text.lower()
     return any(kw in lower for kw in PICKUP_KEYWORDS)
+
+
+def timed_confirm(prompt, timeout=5, default="y"):
+    """Prompt user with auto-confirm after timeout seconds. Returns 'y' or 'n'."""
+    print(f"{prompt} {C.DIM}(auto-{default} in {timeout}s){C.RESET} ", end="", flush=True)
+    start = time.time()
+    buf = ""
+    while time.time() - start < timeout:
+        remaining = int(timeout - (time.time() - start)) + 1
+        # Overwrite countdown
+        print(f"\r{prompt} {C.DIM}(auto-{default} in {remaining}s){C.RESET} ", end="", flush=True)
+        if select.select([sys.stdin], [], [], 0.5)[0]:
+            buf = sys.stdin.readline().strip().lower()
+            break
+    print()  # newline after prompt
+    if buf:
+        return buf
+    print(f"{C.DIM}      Auto-confirmed.{C.RESET}")
+    return default
+
+
+# ---- Floor Calibration ----
+# _floor_drop: how many degrees below SETUP_SHOULDER_LIFT the floor is.
+# None = not calibrated, will auto-calibrate on first pickup.
+_floor_drop = None
+
+def read_actual_shoulder_lift():
+    """Read the actual shoulder_lift from hardware, converted to agent space."""
+    joints = hardware_to_agent(get_joints())
+    return joints.get("shoulder_lift", None)
+
+def calibrate_floor():
+    """Lower shoulder_lift from SETUP_SHOULDER_LIFT until the motor stalls (floor hit).
+    Returns the drop in degrees from SETUP_SHOULDER_LIFT to the floor, or None on failure."""
+    global _floor_drop
+
+    push_state("calibrating", "Starting floor calibration...")
+    print(f"\n{C.CYAN}{C.BOLD}[calib]{C.RESET} Floor calibration starting...")
+    print(f"{C.DIM}[calib] Moving to home, then lowering to setup position...{C.RESET}")
+
+    # Sync from hardware and move to home
+    hw_joints = hardware_to_agent(get_joints())
+    if hw_joints:
+        _commanded.update(hw_joints)
+    move_joints_slow(HOME_POSITION)
+    _commanded.update(HOME_POSITION)
+    time.sleep(0.3)
+
+    # Open gripper
+    move_joints({"gripper": 100})
+    time.sleep(0.3)
+
+    # Lower to setup position
+    move_joints_slow({"shoulder_lift": SETUP_SHOULDER_LIFT})
+    time.sleep(0.5)
+
+    push_state("calibrating", "Probing for floor...")
+    print(f"{C.CYAN}[calib]{C.RESET} Probing for floor (lowering {CALIB_STEP}° per step)...")
+
+    commanded_sl = SETUP_SHOULDER_LIFT
+    max_probe = 40  # don't go more than 40° below setup
+
+    for step in range(int(max_probe / CALIB_STEP)):
+        commanded_sl -= CALIB_STEP
+
+        # Send directly to hardware (bypass clamp — we need to find the real floor)
+        try:
+            requests.post(f"{ROBOT_SERVER}/move",
+                          json={"shoulder_lift": -commanded_sl}, timeout=10)
+        except Exception:
+            pass
+        time.sleep(CALIB_DELAY)
+
+        # Read actual position
+        actual_sl = read_actual_shoulder_lift()
+        if actual_sl is None:
+            print(f"{C.RED}[calib]{C.RESET} Cannot read joint positions")
+            return None
+
+        diff = abs(commanded_sl - actual_sl)
+        if step % 5 == 0:
+            print(f"{C.DIM}[calib] step {step}: cmd={commanded_sl:.1f}° actual={actual_sl:.1f}° diff={diff:.1f}°{C.RESET}")
+
+        if diff > CALIB_STALL_THRESHOLD:
+            # Motor stalled — we hit the floor
+            floor_sl = actual_sl
+            drop = SETUP_SHOULDER_LIFT - floor_sl
+            _floor_drop = drop
+            print(f"{C.GREEN}{C.BOLD}[calib]{C.RESET} Floor detected!")
+            print(f"  Setup position:  {SETUP_SHOULDER_LIFT}°")
+            print(f"  Floor position:  {floor_sl:.1f}°")
+            print(f"  Drop distance:   {C.BOLD}{drop:.1f}°{C.RESET}")
+
+            # Return to setup position
+            print(f"{C.DIM}[calib] Returning to setup position...{C.RESET}")
+            for s in range(SLOW_MOVE_STEPS):
+                t = (s + 1) / SLOW_MOVE_STEPS
+                sl = floor_sl + (SETUP_SHOULDER_LIFT - floor_sl) * t
+                try:
+                    requests.post(f"{ROBOT_SERVER}/move",
+                                  json={"shoulder_lift": -sl}, timeout=10)
+                except Exception:
+                    pass
+                time.sleep(SLOW_MOVE_DELAY)
+            _commanded["shoulder_lift"] = SETUP_SHOULDER_LIFT
+
+            # Return to home
+            move_joints_slow(HOME_POSITION)
+            _commanded.update(HOME_POSITION)
+            push_state("idle", f"Calibrated: drop={drop:.1f}°")
+            print(f"{C.GREEN}[calib]{C.RESET} Calibration complete. Drop = {drop:.1f}°\n")
+            return drop
+
+    push_state("idle", "Calibration failed")
+    print(f"{C.RED}[calib]{C.RESET} Floor not detected within {max_probe}° — calibration failed.\n")
+    return None
+
+
+def print_help():
+    """Print all available commands."""
+    print(f"\n{C.BOLD}Commands:{C.RESET}")
+    print(f"  {C.CYAN}/help{C.RESET}, {C.CYAN}/h{C.RESET}              — show this help")
+    print(f"  {C.CYAN}/home{C.RESET}                — move to home position (slow)")
+    print(f"  {C.CYAN}/default{C.RESET}             — move all joints to 0 (slow)")
+    print(f"  {C.CYAN}/drop{C.RESET}                — move to drop position (slow)")
+    print(f"  {C.CYAN}/torque-on{C.RESET}  [motor]  — enable torque  {C.DIM}(alias: /t-on){C.RESET}")
+    print(f"  {C.CYAN}/torque-off{C.RESET} [motor]  — disable torque {C.DIM}(alias: /t-off){C.RESET}")
+    print(f"  {C.CYAN}/move{C.RESET} <joint> <deg>  — move a single joint")
+    print(f"  {C.CYAN}/pos{C.RESET}  [motor]        — show joint positions")
+    print(f"  {C.CYAN}/cam{C.RESET}  [top|wrist]    — show camera info")
+    print(f"  {C.CYAN}/maincam{C.RESET} <top|wrist>  — set free-mode camera")
+    print(f"  {C.CYAN}/calib{C.RESET}               — calibrate floor distance for pickup")
+    print(f"  {C.CYAN}/teleop{C.RESET} [start|stop]  — leader arm teleoperation")
+    print(f"  {C.CYAN}/doctor{C.RESET}              — run full diagnostics")
+    print(f"\n{C.BOLD}Joint aliases:{C.RESET} {C.DIM}sp sl ef wf wr g  (or: pan lift elbow flex roll grip){C.RESET}")
+    print(f"{C.BOLD}Quit:{C.RESET} quit / exit / q\n")
+
+
+def startup_health_check():
+    """Quick health check at startup — verify server, arm, and cameras."""
+    print(f"{C.BOLD}Running startup checks...{C.RESET}")
+    all_ok = True
+
+    # Server
+    try:
+        r = requests.get(f"{ROBOT_SERVER}/status", timeout=3)
+        status = r.json()
+        print(f"  {C.GREEN}OK{C.RESET}  Server connected")
+        arm_ok = status.get("robot_connected", False)
+        print(f"  {C.GREEN}OK{C.RESET}  Arm connected" if arm_ok else f"  {C.YELLOW}--{C.RESET}  Arm not connected (camera-only mode)")
+        if not arm_ok:
+            all_ok = False
+    except Exception as e:
+        print(f"  {C.RED}FAIL{C.RESET}  Cannot reach server at {ROBOT_SERVER}")
+        print(f"        Start robot_server.py first!")
+        return False
+
+    # Cameras — actually fetch a frame
+    for cam in ["top", "wrist"]:
+        try:
+            r = requests.get(f"{ROBOT_SERVER}/snapshot/{cam}", timeout=5)
+            data = r.json()
+            if "error" in data:
+                print(f"  {C.RED}FAIL{C.RESET}  {cam} camera — {data['error']}")
+                all_ok = False
+            else:
+                print(f"  {C.GREEN}OK{C.RESET}  {cam} camera ({data.get('width')}x{data.get('height')})")
+        except Exception:
+            print(f"  {C.RED}FAIL{C.RESET}  {cam} camera — no response")
+            all_ok = False
+
+    if all_ok:
+        print(f"  {C.GREEN}{C.BOLD}All checks passed.{C.RESET}\n")
+    else:
+        print(f"  {C.YELLOW}Some checks failed — limited functionality.{C.RESET}\n")
+    return all_ok
 
 
 def get_top_snapshot():
@@ -221,14 +537,19 @@ Always explain what you are doing."""
 
 def run_free_agent(client, user_input):
     """Let Gemini freely control the robot for non-pickup prompts."""
-    print("\n[free] Running free-form agent mode\n")
+    print(f"\n{C.CYAN}[free]{C.RESET} Running free-form agent mode\n")
 
-    # Build message with a top camera snapshot for context
-    image_b64 = get_top_snapshot()
+    # Build message with camera snapshot for context
+    if FREE_MODE_CAMERA == "wrist":
+        image_b64 = get_wrist_snapshot()
+        cam_label = "wrist"
+    else:
+        image_b64 = get_top_snapshot()
+        cam_label = "top"
     parts = []
     if image_b64:
         parts.append(types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg"))
-        print("[free] Attached top camera snapshot")
+        print(f"{C.DIM}[free] Attached {cam_label} camera snapshot{C.RESET}")
 
     # Include current joint state
     joints = get_joints_agent()
@@ -241,7 +562,7 @@ def run_free_agent(client, user_input):
         config=types.GenerateContentConfig(system_instruction=FREE_SYSTEM)
     )
 
-    print(f"Gemini: {response.text}\n")
+    print(f"{C.BOLD}Gemini:{C.RESET} {response.text}\n")
 
     # Parse and execute any action in the response
     match = re.search(r'\{.*\}', response.text, re.DOTALL)
@@ -282,18 +603,103 @@ def run_free_agent(client, user_input):
         print(f"Gemini: {followup.text}\n")
 
 
+def prescan_target(client, target_description):
+    """Use top camera to estimate target position before moving the arm.
+    Returns (pan_degrees, forward_degrees) or None on failure."""
+    push_state("homing", "Scanning workspace from top camera...")
+    print(f"\n{C.CYAN}[prescan]{C.RESET} Scanning workspace for: {C.BOLD}{target_description}{C.RESET}")
+
+    top_b64 = get_top_snapshot()
+    if not top_b64:
+        print(f"{C.YELLOW}[prescan]{C.RESET} No top camera — skipping prescan")
+        return None
+
+    parts = [
+        types.Part.from_bytes(data=base64.b64decode(top_b64), mime_type="image/jpeg"),
+        types.Part.from_text(text=f"Target object: {target_description}\n\nEstimate how far left/right and forward/backward the target is from the center of the board."),
+    ]
+
+    try:
+        response = client.models.generate_content(
+            model=ALIGNER_MODEL,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.GenerateContentConfig(system_instruction=PRESCAN_SYSTEM)
+        )
+    except Exception as e:
+        print(f"{C.RED}[prescan]{C.RESET} API error: {e}")
+        return None
+
+    match = re.search(r'\{.*\}', response.text, re.DOTALL)
+    if not match:
+        print(f"{C.YELLOW}[prescan]{C.RESET} Could not parse response")
+        return None
+
+    try:
+        result = json.loads(match.group())
+    except json.JSONDecodeError:
+        print(f"{C.YELLOW}[prescan]{C.RESET} Invalid JSON in response")
+        return None
+
+    pan = float(result.get("pan_degrees", 0))
+    fwd = float(result.get("forward_degrees", 0))
+    print(f"{C.GREEN}[prescan]{C.RESET} Estimated: pan={C.BOLD}{pan:.0f}°{C.RESET}, forward={C.BOLD}{fwd:.0f}°{C.RESET}")
+    return (pan, fwd)
+
+
+def apply_prescan(pan_degrees, forward_degrees):
+    """Move the arm based on prescan estimates using the same direction logic as alignment."""
+    moves = {}
+
+    if abs(pan_degrees) > 1:
+        moves["shoulder_pan"] = _commanded.get("shoulder_pan", 0) + pan_degrees
+        print(f"{C.BLUE}[prescan]{C.RESET} Moving pan {pan_degrees:+.0f}°")
+
+    if abs(forward_degrees) > 1:
+        if forward_degrees > 0:
+            moves["shoulder_lift"] = _commanded.get("shoulder_lift", 0) - forward_degrees * FORWARD_SHOULDER_RATIO
+            moves["elbow_flex"] = _commanded.get("elbow_flex", 0) - forward_degrees * ELBOW_FORWARD_RATIO
+        else:
+            moves["shoulder_lift"] = _commanded.get("shoulder_lift", 0) - forward_degrees * BACKWARD_SHOULDER_RATIO
+            moves["elbow_flex"] = _commanded.get("elbow_flex", 0) - forward_degrees * ELBOW_BACKWARD_RATIO
+        print(f"{C.BLUE}[prescan]{C.RESET} Moving forward/back {forward_degrees:+.0f}°")
+
+    if moves:
+        move_joints_slow(moves)
+    else:
+        print(f"{C.DIM}[prescan] Target near center, no pre-move needed{C.RESET}")
+
+
 def visual_align(client, target_description):
     """Navigate arm to target using wrist camera feedback. Returns True when aligned."""
-    print(f"\n[align] Navigating to: {target_description}")
-    print(f"[align] Max {MAX_ALIGN_ITERATIONS} iterations, min move starts at {MIN_DELTA_START}° dropping by {MIN_DELTA_STEP}° after iter 5\n")
+    print(f"\n{C.CYAN}[align]{C.RESET} Navigating to: {C.BOLD}{target_description}{C.RESET}")
+    print(f"{C.DIM}[align] Max {MAX_ALIGN_ITERATIONS} iterations — type 'done' or press Done on dashboard to skip{C.RESET}\n")
 
     for i in range(MAX_ALIGN_ITERATIONS):
+        # Check for skip: terminal input or dashboard "done" button
+        if select.select([sys.stdin], [], [], 0)[0]:
+            line = sys.stdin.readline().strip().lower()
+            if line in ("/done", "done", "d"):
+                print(f"{C.GREEN}[align]{C.RESET} Skipped by user after {i} iteration(s)")
+                return True
+        try:
+            r = requests.get(f"{ROBOT_SERVER}/status", timeout=1)
+            agent = r.json().get("agent", {})
+            if agent.get("confirm_result") == "done":
+                print(f"{C.GREEN}[align]{C.RESET} Skipped via dashboard after {i} iteration(s)")
+                # Reset so it doesn't re-trigger
+                requests.post(f"{ROBOT_SERVER}/agent_state", json={"confirm_pending": False}, timeout=1)
+                return True
+        except Exception:
+            pass
+
         use_top = i < TOP_WRIST_ITERATIONS
-        print(f"[align] Iteration {i + 1}/{MAX_ALIGN_ITERATIONS} ({'top+wrist' if use_top else 'wrist only'})")
+        cam_info = f"{C.DIM}top+wrist{C.RESET}" if use_top else f"{C.DIM}wrist only{C.RESET}"
+        push_state("aligning", f"Iteration {i+1}/{MAX_ALIGN_ITERATIONS}", align_iteration=i+1, align_max=MAX_ALIGN_ITERATIONS)
+        print(f"{C.CYAN}[align]{C.RESET} Iteration {C.BOLD}{i + 1}/{MAX_ALIGN_ITERATIONS}{C.RESET} ({cam_info})")
 
         wrist_b64 = get_wrist_snapshot()
         if not wrist_b64:
-            print("[align] Could not get wrist snapshot")
+            print(f"{C.RED}[align]{C.RESET} Could not get wrist snapshot")
             return False
 
         parts = []
@@ -314,7 +720,7 @@ def visual_align(client, target_description):
 
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
         if not match:
-            print("[align] Could not parse response, skipping")
+            print(f"{C.YELLOW}[align]{C.RESET} Could not parse response, skipping")
             continue
 
         try:
@@ -323,16 +729,16 @@ def visual_align(client, target_description):
             continue
 
         if result.get("aligned"):
-            print(f"[align] Target reached after {i + 1} iteration(s)")
+            print(f"{C.GREEN}{C.BOLD}[align]{C.RESET} Target reached after {i + 1} iteration(s)")
             return True
 
         if result.get("lost"):
-            print("[align] Target not visible — stopping")
-            return False
+            print(f"{C.YELLOW}[align]{C.RESET} Target not visible — continuing anyway")
+            continue
 
         direction = result.get("direction")
         if not direction:
-            print("[align] No direction — assuming aligned")
+            print(f"{C.GREEN}[align]{C.RESET} No direction — assuming aligned")
             return True
 
         # Clamp degrees
@@ -361,11 +767,11 @@ def visual_align(client, target_description):
             print(f"[align] Unknown direction '{direction}', skipping")
             continue
 
-        print(f"[align] Moving {direction} {degrees:.0f}°")
+        print(f"{C.BLUE}[align]{C.RESET} Moving {C.BOLD}{direction}{C.RESET} {degrees:.0f}°")
         move_joints_slow(new_pos)
         time.sleep(ALIGN_SETTLE_DELAY)
 
-    print("[align] Max iterations reached")
+    print(f"{C.YELLOW}[align]{C.RESET} Max iterations reached")
     return True
 
 
@@ -376,24 +782,15 @@ def run_agent():
 
     client = genai.Client(api_key=API_KEY)
 
-    print("=" * 50)
-    print("SO-101 Gemini Robot Agent")
-    print(f"Model:  {ALIGNER_MODEL}")
-    print(f"Server: {ROBOT_SERVER}")
-    print(f"Stream: http://localhost:7878/stream")
-    print("Type 'quit' to exit")
-    print("=" * 50)
+    print(f"\n{C.BOLD}{'=' * 50}{C.RESET}")
+    print(f"{C.BOLD}SO-101 Gemini Robot Agent{C.RESET}")
+    print(f"  Model:  {C.CYAN}{ALIGNER_MODEL}{C.RESET}")
+    print(f"  Server: {C.CYAN}{ROBOT_SERVER}{C.RESET}")
+    print(f"  Stream: {C.CYAN}http://localhost:7878/stream{C.RESET}")
+    print(f"  Type {C.CYAN}/help{C.RESET} for commands, {C.CYAN}quit{C.RESET} to exit")
+    print(f"{C.BOLD}{'=' * 50}{C.RESET}\n")
 
-    try:
-        r = requests.get(f"{ROBOT_SERVER}/status", timeout=3)
-        status = r.json()
-        print(f"✓ Robot server connected")
-        print(f"  Cameras: {status.get('cameras', [])}")
-        print(f"  Arm: {'connected' if status.get('robot_connected') else 'NOT connected (camera-only mode)'}")
-    except Exception:
-        print(f"⚠  WARNING: Cannot reach robot server at {ROBOT_SERVER}")
-        print("   Start robot_server.py first!")
-    print()
+    startup_health_check()
 
     while True:
         try:
@@ -413,93 +810,310 @@ def run_agent():
             parts = user_input.split()
             cmd = parts[0].lower()
 
-            if cmd == "/torque-h":
-                print("/torque-on   — enable torque (servos hold position)")
-                print("/torque-off  — disable torque (move arm freely by hand)")
+            if cmd in ("/help", "/h"):
+                print_help()
+
+            elif cmd in ("/home",):
+                print(f"{C.BLUE}[home]{C.RESET} Moving to home position (slow)...")
+                hw_joints = hardware_to_agent(get_joints())
+                if hw_joints:
+                    _commanded.update(hw_joints)
+                move_joints_slow(HOME_POSITION)
+                _commanded.update(HOME_POSITION)
+                print(f"{C.GREEN}[home]{C.RESET} Done.")
+
+            elif cmd in ("/default",):
+                print(f"{C.BLUE}[default]{C.RESET} Moving to default position (slow)...")
+                hw_joints = hardware_to_agent(get_joints())
+                if hw_joints:
+                    _commanded.update(hw_joints)
+                move_joints_slow(DEFAULT_POSITION)
+                _commanded.update(DEFAULT_POSITION)
+                print(f"{C.GREEN}[default]{C.RESET} Done.")
+
+            elif cmd in ("/drop",):
+                print(f"{C.BLUE}[drop]{C.RESET} Moving to drop position (slow)...")
+                hw_joints = hardware_to_agent(get_joints())
+                if hw_joints:
+                    _commanded.update(hw_joints)
+                move_joints_slow(DROP_POSITION)
+                _commanded.update(DROP_POSITION)
+                print(f"{C.GREEN}[drop]{C.RESET} Done.")
+
+            elif cmd in ("/torque-h", "/t-h"):
+                print(f"  {C.CYAN}/torque-on{C.RESET}  [motor]  — enable torque (all or specific)")
+                print(f"  {C.CYAN}/torque-off{C.RESET} [motor]  — disable torque (all or specific)")
+                print(f"  Motors: {C.DIM}shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper{C.RESET}")
+                print(f"  Aliases: {C.DIM}sp, sl, ef, wf, wr, g{C.RESET}")
+                print(f"  Example: /t-off g")
 
             elif cmd == "/move-h":
-                print("/move <joint> <degrees>  — move a single joint to the given angle")
-                print("  Joints:  shoulder_pan | shoulder_lift | elbow_flex | wrist_flex | wrist_roll | gripper")
-                print("  Example: /move shoulder_lift -30")
-                print("  Example: /move gripper 100")
+                print(f"  {C.CYAN}/move{C.RESET} <joint> <degrees>  — move a single joint")
+                print(f"  Joints: {C.DIM}shoulder_pan | shoulder_lift | elbow_flex | wrist_flex | wrist_roll | gripper{C.RESET}")
+                print(f"  Aliases: {C.DIM}sp sl ef wf wr g  (or: pan lift elbow flex roll grip){C.RESET}")
+                print(f"  Example: /move sl -30")
+                print(f"  Example: /move g 100")
 
-            elif cmd == "/torque-on":
+            elif cmd in ("/torque-on", "/t-on"):
+                motor = resolve_joint(parts[1]) if len(parts) > 1 else None
                 try:
-                    r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": True}, timeout=5)
-                    print("[torque] ON" if r.json().get("ok") else f"[torque] Error: {r.json()}")
+                    payload = {"enabled": True}
+                    if motor:
+                        payload["motor"] = motor
+                    r = requests.post(f"{ROBOT_SERVER}/enable", json=payload, timeout=5)
+                    label = motor or "all"
+                    if r.json().get("ok"):
+                        print(f"{C.GREEN}[torque]{C.RESET} {label} ON")
+                    else:
+                        print(f"{C.RED}[torque]{C.RESET} Error: {r.json()}")
                 except Exception as e:
-                    print(f"[torque] Error: {e}")
+                    print(f"{C.RED}[torque]{C.RESET} Error: {e}")
 
-            elif cmd == "/torque-off":
+            elif cmd in ("/torque-off", "/t-off"):
+                motor = resolve_joint(parts[1]) if len(parts) > 1 else None
                 try:
-                    r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": False}, timeout=5)
-                    print("[torque] OFF" if r.json().get("ok") else f"[torque] Error: {r.json()}")
+                    payload = {"enabled": False}
+                    if motor:
+                        payload["motor"] = motor
+                    r = requests.post(f"{ROBOT_SERVER}/enable", json=payload, timeout=5)
+                    label = motor or "all"
+                    if r.json().get("ok"):
+                        print(f"{C.YELLOW}[torque]{C.RESET} {label} OFF")
+                    else:
+                        print(f"{C.RED}[torque]{C.RESET} Error: {r.json()}")
                 except Exception as e:
-                    print(f"[torque] Error: {e}")
+                    print(f"{C.RED}[torque]{C.RESET} Error: {e}")
+
+            elif cmd == "/pos":
+                motor_filter = resolve_joint(parts[1]) if len(parts) > 1 else None
+                try:
+                    r = requests.get(f"{ROBOT_SERVER}/status", timeout=5)
+                    status = r.json()
+                    joints = status.get("joints", {})
+                    torque = status.get("torque_enabled", None)
+                    agent_joints = hardware_to_agent(joints)
+                    if motor_filter:
+                        if motor_filter in agent_joints:
+                            print(f"  {motor_filter}: {C.CYAN}{agent_joints[motor_filter]:.1f}°{C.RESET}")
+                        else:
+                            print(f"{C.RED}[pos]{C.RESET} Unknown motor: {motor_filter}")
+                            print(f"  Available: {', '.join(agent_joints.keys())}")
+                    else:
+                        for name, val in agent_joints.items():
+                            print(f"  {name:16s} {C.CYAN}{val:7.1f}°{C.RESET}")
+                    if torque is not None:
+                        t_color = C.GREEN if torque else C.YELLOW
+                        print(f"  Torque: {t_color}{'ON' if torque else 'OFF'}{C.RESET}")
+                except Exception as e:
+                    print(f"{C.RED}[pos]{C.RESET} Error: {e}")
 
             elif cmd == "/move":
                 if len(parts) != 3:
-                    print("[move] Usage: /move <joint> <degrees>")
-                    print("       Joints: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper")
+                    print(f"{C.YELLOW}[move]{C.RESET} Usage: /move <joint> <degrees>")
+                    print(f"       Aliases: {C.DIM}sp sl ef wf wr g{C.RESET}")
                 else:
-                    joint, deg = parts[1], parts[2]
+                    joint = resolve_joint(parts[1])
+                    deg = parts[2]
                     try:
                         deg = float(deg)
                         result = move_joints({joint: deg})
                         if "error" in result:
-                            print(f"[move] Error: {result['error']}")
+                            print(f"{C.RED}[move]{C.RESET} Error: {result['error']}")
                         else:
-                            print(f"[move] {joint} → {deg}°")
+                            print(f"{C.GREEN}[move]{C.RESET} {joint} -> {deg}°")
                     except ValueError:
-                        print(f"[move] Invalid degree value: {parts[2]}")
+                        print(f"{C.RED}[move]{C.RESET} Invalid degree value: {parts[2]}")
 
-            else:
-                print(f"Unknown command: {cmd}")
-                print("Commands: /torque-on  /torque-off  /move <joint> <degrees>")
-                print("Help:     /torque-h   /move-h")
-            continue
+            elif cmd == "/calib":
+                result = calibrate_floor()
+                if result is None:
+                    print(f"{C.YELLOW}[calib]{C.RESET} Calibration failed. Using default drop of 20°.")
 
-        print("[classify] Checking for pickup keywords...")
-        if is_pickup_prompt(client, user_input):
-            # Step 1: Move to home (slow to avoid shaking)
-            print("\n[1/4] Moving to home position...")
-            move_joints(HOME_POSITION)          # direct send — arm may have been moved manually
-            _commanded.update(HOME_POSITION)    # sync tracking to known state
-            time.sleep(1.5)                     # wait for arm to settle
-            print("      Done.")
+            elif cmd == "/doctor":
+                print(f"\n{C.BOLD}[doctor] Running diagnostics...{C.RESET}\n")
+                ok = True
 
-            # Step 2: Open gripper
-            print("[2/4] Opening gripper...")
-            move_joints({"gripper": 100})
-            print("      Done.")
+                print(f"{C.BLUE}[doctor]{C.RESET} 1/5 Checking server connection...")
+                try:
+                    r = requests.get(f"{ROBOT_SERVER}/status", timeout=5)
+                    status = r.json()
+                    saved_joints = hardware_to_agent(status.get("joints", {}))
+                    print(f"      {C.GREEN}OK{C.RESET} — joints: {saved_joints}")
+                except Exception as e:
+                    print(f"      {C.RED}FAIL{C.RESET} — {e}")
+                    ok = False
+                    saved_joints = None
 
-            # Step 3: Lower arm for easier alignment (slow)
-            print(f"[3/5] Lowering arm (shoulder_lift: {SETUP_SHOULDER_LIFT}°, slow)...")
-            move_joints_slow({"shoulder_lift": SETUP_SHOULDER_LIFT})
-            print("      Done.")
+                print(f"{C.BLUE}[doctor]{C.RESET} 2/5 Enabling torque...")
+                try:
+                    r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": True}, timeout=5)
+                    print(f"      {C.GREEN}OK{C.RESET}" if r.json().get("ok") else f"      {C.RED}FAIL{C.RESET} — {r.json()}")
+                except Exception as e:
+                    print(f"      {C.RED}FAIL{C.RESET} — {e}")
+                    ok = False
 
-            # Step 4: Visual alignment
-            print("[4/5] Starting visual alignment...")
-            aligned = visual_align(client, user_input)
+                if saved_joints:
+                    print(f"{C.BLUE}[doctor]{C.RESET} 3/5 Moving joints to 0...")
+                    try:
+                        _commanded.update(saved_joints)
+                        zero = {j: 0 for j in saved_joints}
+                        move_joints_slow(zero)
+                        print(f"      {C.GREEN}OK{C.RESET} — at zero")
+                        time.sleep(0.5)
+                        print("      Restoring original positions...")
+                        move_joints_slow(saved_joints)
+                        print(f"      {C.GREEN}OK{C.RESET} — restored")
+                    except Exception as e:
+                        print(f"      {C.RED}FAIL{C.RESET} — {e}")
+                        ok = False
+                else:
+                    print(f"{C.BLUE}[doctor]{C.RESET} 3/5 Skipped motor test (no joint data)")
 
-            if not aligned:
-                print("\n[align] Could not reach target.")
+                print(f"{C.BLUE}[doctor]{C.RESET} 4/5 Toggling torque off/on...")
                 try:
                     requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": False}, timeout=5)
-                    print("      Torque disabled — move arm back manually.\n")
-                except Exception:
-                    pass
-                continue
+                    time.sleep(0.3)
+                    requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": True}, timeout=5)
+                    print(f"      {C.GREEN}OK{C.RESET}")
+                except Exception as e:
+                    print(f"      {C.RED}FAIL{C.RESET} — {e}")
+                    ok = False
 
-            # Step 5: Confirm and close gripper
-            print("\n[5/5] Ready to grip.")
-            confirm = input("      Close gripper? (y/n): ").strip().lower()
-            if confirm == "y":
-                # Lower arm to floor — bypass clamp so it can reach the object
-                print("      Lowering to object...")
+                print(f"{C.BLUE}[doctor]{C.RESET} 5/5 Testing cameras...")
+                top_ok = get_top_snapshot() is not None
+                print(f"      Top camera:   {C.GREEN}OK{C.RESET}" if top_ok else f"      Top camera:   {C.RED}FAIL{C.RESET}")
+                wrist_ok = get_wrist_snapshot() is not None
+                print(f"      Wrist camera: {C.GREEN}OK{C.RESET}" if wrist_ok else f"      Wrist camera: {C.RED}FAIL{C.RESET}")
+                if not top_ok or not wrist_ok:
+                    ok = False
+
+                if ok:
+                    print(f"\n{C.GREEN}{C.BOLD}[doctor] All checks passed!{C.RESET}\n")
+                else:
+                    print(f"\n{C.YELLOW}[doctor] Some checks failed.{C.RESET}\n")
+
+            elif cmd == "/cam":
+                cam_filter = parts[1].lower() if len(parts) > 1 else None
+                try:
+                    r = requests.get(f"{ROBOT_SERVER}/status", timeout=5)
+                    info = r.json().get("camera_info", {})
+                    if cam_filter:
+                        if cam_filter in info:
+                            c = info[cam_filter]
+                            print(f"  {cam_filter:6s}  {c['name']}  /dev/video{c['index']}")
+                        else:
+                            print(f"{C.RED}[cam]{C.RESET} Unknown camera: {cam_filter}")
+                            print(f"  Available: {', '.join(info.keys())}")
+                    else:
+                        for name, c in info.items():
+                            print(f"  {C.CYAN}{name:6s}{C.RESET}  {c['name']}  /dev/video{c['index']}")
+                        if not info:
+                            print(f"  {C.YELLOW}No cameras connected{C.RESET}")
+                except Exception as e:
+                    print(f"{C.RED}[cam]{C.RESET} Error: {e}")
+
+            elif cmd == "/maincam":
+                global FREE_MODE_CAMERA
+                if len(parts) != 2 or parts[1].lower() not in ("top", "wrist"):
+                    print(f"{C.YELLOW}[maincam]{C.RESET} Usage: /maincam <top|wrist>  (currently: {C.CYAN}{FREE_MODE_CAMERA}{C.RESET})")
+                else:
+                    FREE_MODE_CAMERA = parts[1].lower()
+                    print(f"{C.GREEN}[maincam]{C.RESET} Free-form mode camera set to: {C.CYAN}{FREE_MODE_CAMERA}{C.RESET}")
+
+            elif cmd == "/teleop":
+                action = parts[1].lower() if len(parts) > 1 else None
+                if action == "stop":
+                    try:
+                        r = requests.post(f"{ROBOT_SERVER}/teleop", json={"action": "stop"}, timeout=5)
+                        data = r.json()
+                        if data.get("ok"):
+                            print(f"{C.GREEN}[teleop]{C.RESET} Stopped")
+                        else:
+                            print(f"{C.YELLOW}[teleop]{C.RESET} {data.get('message', 'Unknown error')}")
+                    except Exception as e:
+                        print(f"{C.RED}[teleop]{C.RESET} Error: {e}")
+                elif action == "start" or action is None:
+                    port = parts[2] if len(parts) > 2 else None
+                    try:
+                        payload = {"action": "start"}
+                        if port:
+                            payload["port"] = port
+                        r = requests.post(f"{ROBOT_SERVER}/teleop", json=payload, timeout=10)
+                        data = r.json()
+                        if data.get("ok"):
+                            print(f"{C.GREEN}[teleop]{C.RESET} {C.BOLD}Active{C.RESET} — leader arm controlling follower")
+                            print(f"  {C.DIM}Type /teleop stop to end{C.RESET}")
+                        else:
+                            print(f"{C.RED}[teleop]{C.RESET} {data.get('message', 'Unknown error')}")
+                    except Exception as e:
+                        print(f"{C.RED}[teleop]{C.RESET} Error: {e}")
+                else:
+                    print(f"{C.YELLOW}[teleop]{C.RESET} Usage: /teleop [start [port] | stop]")
+
+            else:
+                print(f"{C.YELLOW}Unknown command: {cmd}{C.RESET} — type {C.CYAN}/help{C.RESET} for available commands")
+            continue
+
+        print(f"{C.DIM}[classify]{C.RESET} Checking for pickup keywords...")
+        if is_pickup_prompt(client, user_input):
+            # Auto-calibrate on first pickup if not yet done
+            if _floor_drop is None:
+                print(f"{C.YELLOW}[calib]{C.RESET} Not calibrated yet — running auto-calibration...")
+                result = calibrate_floor()
+                if result is None:
+                    print(f"{C.YELLOW}[calib]{C.RESET} Failed. Using default drop of 20°.")
+
+            drop = _floor_drop if _floor_drop is not None else 20.0
+
+            # Step 1: Prescan — use top camera to estimate target position BEFORE moving
+            prescan_result = prescan_target(client, user_input)
+
+            # Step 2: Move to home (smooth interpolation)
+            push_state("homing", "Moving to home position...")
+            print(f"\n{C.BLUE}[2/7]{C.RESET} Moving to home position...")
+            hw_joints = hardware_to_agent(get_joints())
+            if hw_joints:
+                _commanded.update(hw_joints)
+            move_joints_slow(HOME_POSITION)
+            _commanded.update(HOME_POSITION)
+            time.sleep(0.5)
+            print(f"      {C.GREEN}Done.{C.RESET}")
+
+            # Step 3: Open gripper
+            push_state("homing", "Opening gripper...")
+            print(f"{C.BLUE}[3/7]{C.RESET} Opening gripper...")
+            move_joints({"gripper": 100})
+            print(f"      {C.GREEN}Done.{C.RESET}")
+
+            # Step 4: Lower arm for easier alignment (slow)
+            push_state("homing", f"Lowering arm to {SETUP_SHOULDER_LIFT}°...")
+            print(f"{C.BLUE}[4/7]{C.RESET} Lowering arm (shoulder_lift: {SETUP_SHOULDER_LIFT}°)...")
+            move_joints_slow({"shoulder_lift": SETUP_SHOULDER_LIFT})
+            print(f"      {C.GREEN}Done.{C.RESET}")
+
+            # Step 5: Apply prescan — jump to estimated target position
+            if prescan_result:
+                pan, fwd = prescan_result
+                push_state("homing", f"Jumping to prescan estimate (pan={pan:.0f}°, fwd={fwd:.0f}°)")
+                print(f"{C.BLUE}[5/7]{C.RESET} Applying prescan estimate...")
+                apply_prescan(pan, fwd)
+                time.sleep(0.3)
+                print(f"      {C.GREEN}Done.{C.RESET}")
+            else:
+                print(f"{C.DIM}[5/7] Prescan skipped{C.RESET}")
+
+            # Step 6: Fine visual alignment
+            print(f"{C.BLUE}[6/7]{C.RESET} Starting visual alignment...")
+            visual_align(client, user_input)
+
+            # Step 7: Confirm and close gripper
+            print(f"\n{C.BOLD}[7/7] Ready to grip.{C.RESET} {C.DIM}(drop={drop:.1f}°){C.RESET}")
+            confirm = wait_for_confirm("      Close gripper? (y/n):", timeout=10, default="y")
+            if confirm in ("y", "yes", ""):
+                push_state("lowering", f"Lowering {drop:.1f}° to object...")
+                print(f"      {C.BLUE}Lowering to object ({drop:.1f}°)...{C.RESET}")
                 start_sl = _commanded.get("shoulder_lift", 0)
-                target_sl = start_sl - 20
-                # Send directly to skip SHOULDER_LIFT_MIN clamp — use more steps for slower descent
+                target_sl = start_sl - drop
                 lower_steps = SLOW_MOVE_STEPS * 2
                 for step in range(1, lower_steps + 1):
                     t = step / lower_steps
@@ -509,43 +1123,55 @@ def run_agent():
                     except Exception:
                         pass
                     time.sleep(SLOW_MOVE_DELAY)
-                print("      Waiting before grip...")
+                print(f"      {C.DIM}Waiting before lift-off...{C.RESET}")
                 time.sleep(1.0)
-                # Re-enable torque in case servo stalled against the floor
                 try:
                     requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": True}, timeout=5)
                 except Exception:
                     pass
-                print("      Closing gripper...")
-                # Close gripper slowly — retry each step if servo errors from stall
-                for step in range(1, SLOW_MOVE_STEPS + 1):
-                    t = step / SLOW_MOVE_STEPS
-                    g = 100 - 100 * t  # from open (100) to closed (0)
-                    for _ in range(3):  # retry up to 3 times per step
+                print(f"      {C.BLUE}Raising {CALIB_LIFT_OFFSET}° off floor...{C.RESET}")
+                lift_sl = target_sl + CALIB_LIFT_OFFSET
+                try:
+                    requests.post(f"{ROBOT_SERVER}/move", json={"shoulder_lift": -lift_sl}, timeout=10)
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                push_state("gripping", "Closing gripper...")
+                print(f"      {C.BLUE}Closing gripper (slow)...{C.RESET}")
+                grip_steps = SLOW_MOVE_STEPS * 2
+                grip_delay = SLOW_MOVE_DELAY * 2
+                for step in range(1, grip_steps + 1):
+                    t = step / grip_steps
+                    g = 100 - 100 * t
+                    for _ in range(3):
                         try:
                             requests.post(f"{ROBOT_SERVER}/move", json={"gripper": g}, timeout=10)
                             break
                         except Exception:
                             time.sleep(0.1)
-                    time.sleep(SLOW_MOVE_DELAY)
+                    time.sleep(grip_delay)
                 _commanded["gripper"] = 0
-                print("      Gripper closed. Waiting...")
-                time.sleep(3.0)
-                print("      Lifting arm...")
+                print(f"      {C.DIM}Gripper closed. Waiting...{C.RESET}")
+                time.sleep(1.5)
+                push_state("lifting", "Lifting arm...")
+                print(f"      {C.BLUE}Lifting arm...{C.RESET}")
                 move_joints_slow({"shoulder_lift": _commanded.get("shoulder_lift", 0) + 30})
-                print("      Done.")
+                push_state("dropping", "Moving to drop position...")
+                print(f"      {C.BLUE}Moving to drop position...{C.RESET}")
+                move_joints_slow(DROP_POSITION)
+                time.sleep(0.5)
+                print(f"      {C.BLUE}Opening gripper...{C.RESET}")
+                move_joints_slow({"gripper": 100})
+                _commanded["gripper"] = 100
+                push_state("done", "Pickup complete!")
+                print(f"      {C.GREEN}{C.BOLD}Dropped!{C.RESET}")
             else:
-                print("      Skipped.")
-            # Disable torque so arm can be moved manually back to home
-            try:
-                r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": False}, timeout=5)
-                result = r.json()
-                if result.get("ok"):
-                    print("      Torque disabled — move arm back manually.\n")
-                else:
-                    print(f"      Torque disable failed: {result}\n")
-            except Exception as e:
-                print(f"      Torque disable error: {e}\n")
+                push_state("idle", "Pickup cancelled")
+                print(f"      {C.YELLOW}Skipped.{C.RESET}")
+            # Reset to idle after a moment
+            time.sleep(2)
+            push_state("idle")
+            print()  # blank line after pickup
         else:
             run_free_agent(client, user_input)
 
