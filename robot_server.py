@@ -23,15 +23,16 @@ import time
 from io import BytesIO
 from flask import Flask, jsonify, request
 
+from constants import (
+    SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT, SNAPSHOT_TOP_WIDTH, SNAPSHOT_TOP_HEIGHT,
+    JPEG_QUALITY, CROSSHAIR_OFFSET_X, CROSSHAIR_OFFSET_Y, PX_PER_DEG,
+    SLOW_MOVE_STEPS, SLOW_MOVE_DELAY, PRESETS as SHARED_PRESETS,
+    JOINT_ORDER, JOINT_SHORT, JOINT_ALIASES,
+    DEFAULT_PORT, TELEOP_FPS, RECORDINGS_DIR, RECORDING_FPS,
+)
+
 # ---- Config ----
-PORT = 7878
-SNAPSHOT_WIDTH = 256
-SNAPSHOT_HEIGHT = 192
-SNAPSHOT_TOP_WIDTH = 512
-SNAPSHOT_TOP_HEIGHT = 384
-JPEG_QUALITY = 60
-CROSSHAIR_OFFSET_Y = 38  # pixels down from center (tune until dot matches gripper close point)
-CROSSHAIR_OFFSET_X = 30   # pixels right from center
+PORT = DEFAULT_PORT
 
 # Camera device indices — override with CAM_TOP / CAM_WRIST env vars
 # Or use CAM_TOP_NAME / CAM_WRIST_NAME to find cameras by device name
@@ -47,7 +48,6 @@ ROBOT_PORT = os.environ.get("ROBOT_PORT", "/dev/ttyACM0")
 
 # Leader arm for teleop — override with LEADER_PORT env var or --leader-port CLI arg
 LEADER_PORT = os.environ.get("LEADER_PORT", "")
-TELEOP_FPS = 60
 
 app = Flask(__name__)
 
@@ -70,6 +70,12 @@ agent_state = {
     "confirm_pending": False, # True when waiting for grip confirm
     "confirm_result": None,   # "y" or "n" — set by dashboard, read by agent
 }
+
+# ---- Recording State ----
+recording_active = False
+recording_name = None
+recording_frames = []
+recording_thread = None
 
 def find_port_by_serial(serial_number):
     """Find the serial port whose USB serial number matches. Returns device path or None."""
@@ -262,12 +268,7 @@ def get_joint_positions():
     except Exception as e:
         return {"error": str(e)}
 
-# ---- Named Poses ----
-PRESETS = {
-    "home":    {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
-    "default": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0},
-    "rest":    {"shoulder_pan": -1.10, "shoulder_lift": -102.24, "elbow_flex": 96.57, "wrist_flex": 76.35, "wrist_roll": -86.02, "gripper": 1.20},
-}
+PRESETS = SHARED_PRESETS
 
 # ---- Routes ----
 
@@ -282,6 +283,7 @@ def status():
         "joints": joints,
         "torque_enabled": torque_enabled,
         "teleop_active": teleop_active,
+        "recording_active": recording_active,
         "agent": agent_state,
         "timestamp": time.time()
     })
@@ -311,7 +313,7 @@ def mjpeg_generator(name):
             cv2.line(frame, (cx - 20, cy), (cx + 20, cy), (0, 0, 0), 2)
             cv2.line(frame, (cx, cy - 20), (cx, cy + 20), (0, 0, 0), 2)
             # Degree scale ruler (10° ≈ 80px, crosshair is 40px end-to-end)
-            px_per_deg = 8
+            px_per_deg = PX_PER_DEG
             ruler_y = h - 14
             ruler_cx = w // 2
             # Main ruler line
@@ -352,67 +354,256 @@ def stream_index():
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SO-101 Dashboard</title>
 <style>
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--card:#181825;--border:#2a2a3a;--border-hi:#3a3a50;
+  --text:#e0e0ee;--text-dim:#8888a0;--text-muted:#55556a;
+  --accent:#7c6ff0;--accent-dim:#5a50b0;
+  --green:#4ade80;--green-bg:rgba(74,222,128,0.1);--green-border:rgba(74,222,128,0.25);
+  --red:#f87171;--red-bg:rgba(248,113,113,0.1);--red-border:rgba(248,113,113,0.25);
+  --blue:#60a5fa;--blue-bg:rgba(96,165,250,0.1);--blue-border:rgba(96,165,250,0.25);
+  --orange:#fbbf24;--orange-bg:rgba(251,191,36,0.1);--orange-border:rgba(251,191,36,0.25);
+  --cyan:#22d3ee;--purple:#c084fc;
+  --radius:10px;--radius-sm:6px;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#111;color:#eee;font-family:-apple-system,system-ui,sans-serif;padding:16px}
-h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
-.layout{display:flex;gap:16px;flex-wrap:wrap}
-.cameras{display:flex;gap:12px;flex:1;min-width:0}
-.cam-box{flex:1;min-width:0}
-.cam-box p{text-align:center;font-size:14px;color:#888;margin-bottom:4px}
-.cam-box img{width:100%;border-radius:6px;background:#000}
-.panel{width:300px;flex-shrink:0;display:flex;flex-direction:column;gap:12px}
-.card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px}
-.card h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-.joint-row{display:flex;justify-content:space-between;font-size:13px;padding:2px 0;font-family:'SF Mono',monospace}
-.joint-name{color:#999}.joint-val{color:#4fc3f7}
-.torque-status{font-size:13px;margin-top:6px;padding:4px 8px;border-radius:4px;text-align:center;font-weight:600}
-.torque-on{background:#1b5e20;color:#66bb6a}
-.torque-off{background:#4e342e;color:#ff8a65}
-.teleop-on{background:#1a237e;color:#7986cb}
-.teleop-off{background:#212121;color:#757575}
-.btn-row{display:flex;gap:6px;flex-wrap:wrap}
-.btn{flex:1;padding:8px 4px;border:1px solid #444;border-radius:6px;background:#222;color:#eee;
-     font-size:13px;cursor:pointer;text-align:center;min-width:60px;transition:background .15s}
-.btn:hover{background:#333}.btn:active{background:#444}
-.btn-green{border-color:#388e3c;color:#66bb6a}.btn-green:hover{background:#1b5e20}
-.btn-red{border-color:#c62828;color:#ef5350}.btn-red:hover{background:#4e1010}
-.btn-blue{border-color:#1565c0;color:#42a5f5}.btn-blue:hover{background:#0d2137}
-.btn-orange{border-color:#e65100;color:#ffb74d}.btn-orange:hover{background:#3e2723}
-.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.status-dot.ok{background:#66bb6a}.status-dot.err{background:#ef5350}
-#conn{font-size:12px;color:#888;margin-bottom:8px}
-.activity-card{border-color:#444}
-.phase-badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
-.phase-idle{background:#212121;color:#757575}
-.phase-calibrating{background:#4a148c;color:#ce93d8}
-.phase-prescan{background:#006064;color:#4dd0e1}
-.phase-homing{background:#0d47a1;color:#64b5f6}
-.phase-aligning{background:#e65100;color:#ffb74d}
-.phase-waiting_confirm{background:#b71c1c;color:#ef9a9a;animation:pulse 1.5s infinite}
-.phase-lowering{background:#1a237e;color:#7986cb}
-.phase-gripping{background:#880e4f;color:#f48fb1}
-.phase-lifting{background:#0d47a1;color:#64b5f6}
-.phase-dropping{background:#33691e;color:#aed581}
-.phase-done{background:#1b5e20;color:#66bb6a}
+body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,system-ui,'Segoe UI',sans-serif;
+     padding:20px 24px;min-height:100vh}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* Header */
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.header-left{display:flex;align-items:center;gap:12px}
+.logo{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--purple));
+      display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff}
+h1{font-size:18px;font-weight:700;color:#fff;letter-spacing:-0.3px}
+h1 span{color:var(--accent);font-weight:400}
+.header-right{display:flex;align-items:center;gap:12px}
+#conn{font-size:12px;color:var(--text-dim);display:flex;align-items:center;gap:6px}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.status-dot.ok{background:var(--green);box-shadow:0 0 8px rgba(74,222,128,0.4)}
+.status-dot.err{background:var(--red);box-shadow:0 0 8px rgba(248,113,113,0.4)}
+.help-btn{padding:5px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);
+           color:var(--text-dim);font-size:12px;cursor:pointer;transition:all .2s}
+.help-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(124,111,240,0.08)}
+
+/* Layout */
+.layout{display:grid;grid-template-columns:1fr 320px;gap:16px}
+@media(max-width:900px){.layout{grid-template-columns:1fr}.panel{order:-1}}
+
+/* Cameras */
+.cameras{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.cam-box{position:relative;border-radius:var(--radius);overflow:hidden;background:#000;border:1px solid var(--border)}
+.cam-box img{width:100%;display:block;aspect-ratio:4/3;object-fit:cover}
+.cam-label{position:absolute;top:8px;left:8px;padding:3px 10px;border-radius:4px;
+            background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);font-size:11px;font-weight:600;
+            text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim)}
+
+/* Panel */
+.panel{display:flex;flex-direction:column;gap:10px;max-height:calc(100vh - 80px);overflow-y:auto;
+       scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.panel::-webkit-scrollbar{width:4px}
+.panel::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+/* Cards */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px}
+.card h2{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.2px;
+         margin-bottom:10px;font-weight:600;display:flex;align-items:center;gap:6px}
+.card h2 .icon{font-size:14px;opacity:0.6}
+
+/* Activity card */
+.activity-card{border-color:var(--border-hi);background:linear-gradient(135deg,var(--card),rgba(124,111,240,0.03))}
+.phase-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;
+             text-transform:uppercase;letter-spacing:0.8px}
+.phase-idle{background:rgba(85,85,106,0.2);color:var(--text-muted)}
+.phase-calibrating{background:rgba(192,132,252,0.15);color:var(--purple)}
+.phase-prescan{background:rgba(34,211,238,0.12);color:var(--cyan)}
+.phase-homing{background:var(--blue-bg);color:var(--blue)}
+.phase-aligning{background:var(--orange-bg);color:var(--orange)}
+.phase-waiting_confirm{background:var(--red-bg);color:var(--red);animation:pulse 1.5s infinite}
+.phase-lowering{background:var(--blue-bg);color:var(--blue)}
+.phase-gripping{background:rgba(236,72,153,0.12);color:#f472b6}
+.phase-lifting{background:var(--blue-bg);color:var(--blue)}
+.phase-dropping{background:var(--green-bg);color:var(--green)}
+.phase-done{background:var(--green-bg);color:var(--green)}
+.phase-recording{background:var(--red-bg);color:var(--red);animation:pulse 1.5s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.activity-detail{font-size:13px;color:#bbb;margin-top:6px;min-height:18px}
+.activity-detail{font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px;line-height:1.4}
 .progress-row{display:flex;align-items:center;gap:8px;margin-top:8px}
-.progress-bar{flex:1;height:6px;background:#333;border-radius:3px;overflow:hidden}
-.progress-fill{height:100%;background:#ffb74d;border-radius:3px;transition:width .3s}
-.progress-text{font-size:12px;color:#888;min-width:40px}
+.progress-bar{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--orange),#f59e0b);border-radius:3px;transition:width .3s}
+.progress-text{font-size:11px;color:var(--text-muted);min-width:36px;font-family:'JetBrains Mono',monospace}
 .confirm-row{display:flex;gap:8px;margin-top:10px}
-.confirm-row .btn{padding:10px;font-size:14px;font-weight:600}
+.confirm-row .btn{padding:10px;font-size:13px;font-weight:600}
 #confirm-section{display:none}
+
+/* Joint rows with jog buttons */
+.joint-row{display:flex;align-items:center;font-size:12px;padding:3px 0;font-family:'JetBrains Mono','SF Mono',monospace;gap:4px}
+.joint-name{color:var(--text-muted);width:52px;flex-shrink:0;font-weight:500}
+.joint-val{color:var(--cyan);flex:1;text-align:right;font-weight:500;min-width:60px}
+.jog-btn{width:24px;height:22px;border:1px solid var(--border);border-radius:4px;background:var(--surface);
+         color:var(--text-dim);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+         transition:all .15s;padding:0;font-family:'JetBrains Mono',monospace;font-weight:600;flex-shrink:0}
+.jog-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(124,111,240,0.1)}
+.jog-btn:active{background:rgba(124,111,240,0.2);transform:scale(0.95)}
+.jog-step{display:flex;align-items:center;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
+.jog-step label{font-size:11px;color:var(--text-muted);flex:1}
+.jog-step select{background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);
+                  font-size:11px;padding:3px 6px;font-family:'JetBrains Mono',monospace}
+
+/* Status bars */
+.status-bar{font-size:12px;margin-top:8px;padding:5px 10px;border-radius:var(--radius-sm);text-align:center;font-weight:600;letter-spacing:0.3px}
+.torque-on{background:var(--green-bg);color:var(--green);border:1px solid var(--green-border)}
+.torque-off{background:rgba(255,255,255,0.03);color:var(--text-muted);border:1px solid var(--border)}
+.teleop-on{background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border)}
+.teleop-off{background:rgba(255,255,255,0.03);color:var(--text-muted);border:1px solid var(--border)}
+.recording-on{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border);animation:pulse 1.5s infinite}
+
+/* Buttons */
+.btn-row{display:flex;gap:6px;flex-wrap:wrap}
+.btn{flex:1;padding:7px 4px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);
+     color:var(--text);font-size:12px;cursor:pointer;text-align:center;min-width:55px;transition:all .15s;font-weight:500}
+.btn:hover{background:rgba(255,255,255,0.06);border-color:var(--border-hi)}
+.btn:active{transform:scale(0.97)}
+.btn-green{border-color:var(--green-border);color:var(--green)}.btn-green:hover{background:var(--green-bg)}
+.btn-red{border-color:var(--red-border);color:var(--red)}.btn-red:hover{background:var(--red-bg)}
+.btn-blue{border-color:var(--blue-border);color:var(--blue)}.btn-blue:hover{background:var(--blue-bg)}
+.btn-orange{border-color:var(--orange-border);color:var(--orange)}.btn-orange:hover{background:var(--orange-bg)}
+.btn-purple{border-color:rgba(192,132,252,0.25);color:var(--purple)}.btn-purple:hover{background:rgba(192,132,252,0.1)}
+
+/* Recordings card */
+.rec-list{max-height:120px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.rec-item{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px}
+.rec-item:last-child{border-bottom:none}
+.rec-name{color:var(--text);font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rec-meta{color:var(--text-muted);font-size:11px;margin-left:8px;flex-shrink:0;font-family:'JetBrains Mono',monospace}
+.rec-play{width:28px;height:24px;border:1px solid var(--green-border);border-radius:4px;background:transparent;
+           color:var(--green);cursor:pointer;font-size:11px;margin-left:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.rec-play:hover{background:var(--green-bg)}
+.rec-del{width:28px;height:24px;border:1px solid var(--red-border);border-radius:4px;background:transparent;
+         color:var(--red);cursor:pointer;font-size:11px;margin-left:4px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.rec-del:hover{background:var(--red-bg)}
+.rec-empty{color:var(--text-muted);font-size:12px;font-style:italic;padding:8px 0}
+#rec-name-input{background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);
+                font-size:12px;padding:5px 8px;width:100%;margin-bottom:8px;font-family:'Inter',sans-serif}
+#rec-name-input::placeholder{color:var(--text-muted)}
+#rec-name-input:focus{outline:none;border-color:var(--accent)}
+
+/* Help panel */
+.help-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100;
+              align-items:center;justify-content:center}
+.help-overlay.show{display:flex}
+.help-modal{background:var(--card);border:1px solid var(--border-hi);border-radius:14px;padding:24px;
+            max-width:680px;width:90%;max-height:80vh;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.help-modal h2{font-size:16px;color:#fff;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between}
+.help-close{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text-dim);
+            width:30px;height:30px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center}
+.help-close:hover{border-color:var(--red);color:var(--red)}
+.help-section{margin-bottom:16px}
+.help-section h3{font-size:12px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:600}
+.help-table{width:100%;font-size:12px;border-collapse:collapse}
+.help-table td{padding:4px 8px;border-bottom:1px solid var(--border)}
+.help-table td:first-child{color:var(--cyan);font-family:'JetBrains Mono',monospace;white-space:nowrap;width:40%}
+.help-table td:last-child{color:var(--text-dim)}
+.help-tip{font-size:12px;color:var(--text-dim);line-height:1.5;padding:8px 12px;background:var(--surface);border-radius:var(--radius-sm);border-left:3px solid var(--accent)}
 </style>
 </head><body>
-<h1>SO-101 Dashboard</h1>
-<div id="conn"><span class="status-dot" id="dot"></span><span id="conn-text">Connecting...</span></div>
-<div class="layout">
-  <div class="cameras">
-    <div class="cam-box"><p>Top</p><img src="/stream/top"></div>
-    <div class="cam-box"><p>Wrist</p><img src="/stream/wrist"></div>
+
+<!-- Help Modal -->
+<div class="help-overlay" id="help-overlay" onclick="if(event.target===this)toggleHelp()">
+  <div class="help-modal">
+    <h2>SO-101 Reference<button class="help-close" onclick="toggleHelp()">&times;</button></h2>
+
+    <div class="help-section">
+      <h3>Dashboard Controls</h3>
+      <table class="help-table">
+        <tr><td>Joint Jog +/-</td><td>Nudge individual joints by the selected step size</td></tr>
+        <tr><td>Step Size Dropdown</td><td>Set jog increment (1, 5, 10, or 20 degrees)</td></tr>
+        <tr><td>Torque ON/OFF</td><td>Enable or disable motor torque (all joints)</td></tr>
+        <tr><td>Gripper Open/Close</td><td>Fully open (100) or close (0) the gripper</td></tr>
+        <tr><td>Preset Buttons</td><td>Move to Home, Default, or Rest position</td></tr>
+        <tr><td>Teleop Start/Stop</td><td>Begin/end leader arm teleoperation</td></tr>
+        <tr><td>Record/Stop</td><td>Record joint positions during teleop for replay</td></tr>
+        <tr><td>Replay Button</td><td>Replay a saved recording sequence</td></tr>
+      </table>
+    </div>
+
+    <div class="help-section">
+      <h3>Agent CLI Commands</h3>
+      <table class="help-table">
+        <tr><td>/help, /h</td><td>Show all commands</td></tr>
+        <tr><td>/home</td><td>Move to home preset (slow interpolation)</td></tr>
+        <tr><td>/default</td><td>Move all joints to 0</td></tr>
+        <tr><td>/drop</td><td>Move to drop position</td></tr>
+        <tr><td>/move &lt;joint&gt; &lt;deg&gt;</td><td>Move a single joint</td></tr>
+        <tr><td>/pos [motor]</td><td>Show current joint positions</td></tr>
+        <tr><td>/torque-on [motor]</td><td>Enable torque (alias: /t-on)</td></tr>
+        <tr><td>/torque-off [motor]</td><td>Disable torque (alias: /t-off)</td></tr>
+        <tr><td>/calib</td><td>Calibrate floor distance for pickup</td></tr>
+        <tr><td>/teleop [start|stop]</td><td>Leader arm teleoperation</td></tr>
+        <tr><td>/record [name]</td><td>Start recording joint trajectory</td></tr>
+        <tr><td>/stop-record</td><td>Stop recording and save</td></tr>
+        <tr><td>/replay &lt;name&gt;</td><td>Replay a saved recording</td></tr>
+        <tr><td>/recordings</td><td>List saved recordings</td></tr>
+        <tr><td>/doctor</td><td>Run full diagnostics</td></tr>
+      </table>
+    </div>
+
+    <div class="help-section">
+      <h3>Joint Aliases</h3>
+      <table class="help-table">
+        <tr><td>sp, pan</td><td>shoulder_pan</td></tr>
+        <tr><td>sl, lift</td><td>shoulder_lift</td></tr>
+        <tr><td>ef, elbow</td><td>elbow_flex</td></tr>
+        <tr><td>wf, flex</td><td>wrist_flex</td></tr>
+        <tr><td>wr, roll</td><td>wrist_roll</td></tr>
+        <tr><td>g, grip</td><td>gripper</td></tr>
+      </table>
+    </div>
+
+    <div class="help-section">
+      <h3>Presets</h3>
+      <table class="help-table">
+        <tr><td>home</td><td>All joints 0, wrist_roll -90</td></tr>
+        <tr><td>default</td><td>All joints 0</td></tr>
+        <tr><td>rest</td><td>Folded position (arm tucked in)</td></tr>
+      </table>
+    </div>
+
+    <div class="help-section">
+      <h3>Tips</h3>
+      <div class="help-tip">
+        Type natural language to the Gemini agent for pickup tasks (e.g. "pick up the red block").
+        The agent uses vision to align the gripper automatically. You can press <b>Done</b> on the
+        dashboard to skip the alignment phase, or <b>Confirm/Cancel</b> to approve or reject a grip.
+        <br><br>
+        Use <b>Teach &amp; Replay</b> to record joint positions during teleop and replay them later.
+        Start teleop, press Record, move the arm, then Stop to save.
+      </div>
+    </div>
   </div>
+</div>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">S</div>
+    <h1>SO-101 <span>Dashboard</span></h1>
+  </div>
+  <div class="header-right">
+    <div id="conn"><span class="status-dot" id="dot"></span><span id="conn-text">Connecting...</span></div>
+    <button class="help-btn" onclick="toggleHelp()">? Help</button>
+  </div>
+</div>
+
+<div class="layout">
+  <div>
+    <div class="cameras">
+      <div class="cam-box"><div class="cam-label">Top</div><img src="/stream/top"></div>
+      <div class="cam-box"><div class="cam-label">Wrist</div><img src="/stream/wrist"></div>
+    </div>
+  </div>
+
   <div class="panel">
+    <!-- Agent Activity -->
     <div class="card activity-card">
       <h2>Agent Activity</h2>
       <div><span class="phase-badge phase-idle" id="phase-badge">IDLE</span></div>
@@ -420,83 +611,165 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
       <div class="progress-row" id="progress-row" style="display:none">
         <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
         <span class="progress-text" id="progress-text">0/0</span>
-        <button class="btn btn-orange" style="flex:0;min-width:50px;padding:4px 10px;font-size:12px" onclick="skipAlign()">Done</button>
+        <button class="btn btn-orange" style="flex:0;min-width:44px;padding:4px 10px;font-size:11px" onclick="skipAlign()">Done</button>
       </div>
       <div id="confirm-section" class="confirm-row">
         <button class="btn btn-green" onclick="confirmGrip('y')">Confirm Grip</button>
         <button class="btn btn-red" onclick="confirmGrip('n')">Cancel</button>
       </div>
     </div>
+
+    <!-- Joint Positions + Jog -->
     <div class="card">
-      <h2>Joint Positions</h2>
+      <h2>Joints</h2>
       <div id="joints"></div>
-      <div id="torque-bar" class="torque-status torque-off">TORQUE OFF</div>
-    </div>
-    <div class="card">
-      <h2>Torque</h2>
-      <div class="btn-row">
-        <button class="btn btn-green" onclick="torque(true)">ON</button>
-        <button class="btn btn-red" onclick="torque(false)">OFF</button>
+      <div class="jog-step">
+        <label>Jog step:</label>
+        <select id="jog-step" onchange="jogStep=parseInt(this.value)">
+          <option value="1">1&deg;</option>
+          <option value="5" selected>5&deg;</option>
+          <option value="10">10&deg;</option>
+          <option value="20">20&deg;</option>
+        </select>
       </div>
+      <div id="torque-bar" class="status-bar torque-off">TORQUE OFF</div>
     </div>
+
+    <!-- Controls -->
     <div class="card">
-      <h2>Gripper</h2>
-      <div class="btn-row">
-        <button class="btn btn-green" onclick="grip(100)">Open</button>
-        <button class="btn btn-red" onclick="grip(0)">Close</button>
+      <h2>Controls</h2>
+      <div class="btn-row" style="margin-bottom:6px">
+        <button class="btn btn-green" onclick="torque(true)">Torque ON</button>
+        <button class="btn btn-red" onclick="torque(false)">Torque OFF</button>
       </div>
-    </div>
-    <div class="card">
-      <h2>Presets</h2>
+      <div class="btn-row" style="margin-bottom:6px">
+        <button class="btn btn-green" onclick="grip(100)">Grip Open</button>
+        <button class="btn btn-red" onclick="grip(0)">Grip Close</button>
+      </div>
       <div class="btn-row">
         <button class="btn btn-blue" onclick="preset('home')">Home</button>
         <button class="btn btn-blue" onclick="preset('default')">Default</button>
         <button class="btn btn-blue" onclick="preset('rest')">Rest</button>
       </div>
     </div>
+
+    <!-- Teleop -->
     <div class="card">
       <h2>Teleop</h2>
-      <div id="teleop-bar" class="torque-status teleop-off">TELEOP OFF</div>
+      <div id="teleop-bar" class="status-bar teleop-off">TELEOP OFF</div>
       <div class="btn-row" style="margin-top:8px">
         <button class="btn btn-green" onclick="teleopCtl('start')">Start</button>
         <button class="btn btn-red" onclick="teleopCtl('stop')">Stop</button>
       </div>
     </div>
+
+    <!-- Teach & Replay -->
+    <div class="card">
+      <h2>Teach &amp; Replay</h2>
+      <input id="rec-name-input" type="text" placeholder="Recording name..." maxlength="40">
+      <div class="btn-row" style="margin-bottom:8px">
+        <button class="btn btn-red" id="rec-btn" onclick="toggleRecord()">Record</button>
+        <button class="btn btn-purple" onclick="replayFromInput()">Replay</button>
+      </div>
+      <div id="rec-bar" class="status-bar" style="display:none"></div>
+      <div class="rec-list" id="rec-list"><div class="rec-empty">No recordings yet</div></div>
+    </div>
   </div>
 </div>
+
 <script>
 const JOINT_ORDER=['shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll','gripper'];
 const SHORT={shoulder_pan:'Pan',shoulder_lift:'Lift',elbow_flex:'Elbow',wrist_flex:'Flex',wrist_roll:'Roll',gripper:'Grip'};
 const PHASE_LABELS={idle:'Idle',calibrating:'Calibrating',homing:'Homing',prescan:'Scanning',aligning:'Aligning',
-  waiting_confirm:'Waiting for Confirm',lowering:'Lowering',gripping:'Gripping',lifting:'Lifting',
-  dropping:'Dropping',done:'Done'};
-function post(url,body){fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
+  waiting_confirm:'Waiting',lowering:'Lowering',gripping:'Gripping',lifting:'Lifting',
+  dropping:'Dropping',done:'Done',recording:'Recording'};
+let jogStep=5;
+function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
 function torque(on){post('/enable',{enabled:on})}
 function grip(v){post('/move',{gripper:v})}
 function preset(p){post('/move_preset',{pose:p})}
 function teleopCtl(a){post('/teleop',{action:a})}
 function confirmGrip(v){post('/confirm_grip',{confirm:v})}
 function skipAlign(){post('/confirm_grip',{confirm:'done'})}
+function jogJoint(joint,dir){post('/move_jog',{joint:joint,delta:dir*jogStep})}
+function toggleHelp(){document.getElementById('help-overlay').classList.toggle('show')}
+
+// Recording
+let isRecording=false;
+function toggleRecord(){
+  if(!isRecording){
+    let name=document.getElementById('rec-name-input').value.trim();
+    if(!name){name='rec_'+Date.now()}
+    post('/recording/start',{name:name}).then(r=>r.json()).then(d=>{
+      if(d.ok){isRecording=true;updateRecBtn()}
+    });
+  }else{
+    post('/recording/stop',{}).then(r=>r.json()).then(d=>{
+      isRecording=false;updateRecBtn();loadRecordings();
+    });
+  }
+}
+function updateRecBtn(){
+  let btn=document.getElementById('rec-btn');
+  let bar=document.getElementById('rec-bar');
+  if(isRecording){
+    btn.textContent='Stop';btn.className='btn btn-orange';
+    bar.style.display='block';bar.className='status-bar recording-on';bar.textContent='RECORDING';
+  }else{
+    btn.textContent='Record';btn.className='btn btn-red';
+    bar.style.display='none';
+  }
+}
+function replayFromInput(){
+  let name=document.getElementById('rec-name-input').value.trim();
+  if(name)replayRec(name);
+}
+function replayRec(name){post('/recording/replay',{name:name})}
+function deleteRec(name){if(confirm('Delete "'+name+'"?'))post('/recording/delete',{name:name}).then(()=>loadRecordings())}
+function loadRecordings(){
+  fetch('/recordings').then(r=>r.json()).then(d=>{
+    let el=document.getElementById('rec-list');
+    if(!d.recordings||d.recordings.length===0){el.innerHTML='<div class="rec-empty">No recordings yet</div>';return}
+    let h='';
+    for(let r of d.recordings){
+      let dur=r.duration?r.duration.toFixed(1)+'s':'';
+      let frames=r.frames||0;
+      h+='<div class="rec-item"><span class="rec-name">'+r.name+'</span><span class="rec-meta">'+frames+'f '+dur+'</span>';
+      h+='<button class="rec-play" onclick="replayRec(\''+r.name+'\')" title="Replay">&#9654;</button>';
+      h+='<button class="rec-del" onclick="deleteRec(\''+r.name+'\')" title="Delete">&times;</button></div>';
+    }
+    el.innerHTML=h;
+  }).catch(()=>{});
+}
+
 function poll(){
   fetch('/status').then(r=>r.json()).then(d=>{
     document.getElementById('dot').className='status-dot ok';
-    document.getElementById('conn-text').textContent='Connected — arm '+(d.robot_connected?'online':'offline');
+    document.getElementById('conn-text').textContent='Connected'+(d.robot_connected?' \u2022 arm online':' \u2022 arm offline');
     let h='';
     if(d.joints){
       for(let j of JOINT_ORDER){
         let k=Object.keys(d.joints).find(x=>x.replace('.pos','')==j);
         let v=k?d.joints[k]:'-';
-        if(typeof v==='number')v=v.toFixed(1)+'\\u00b0';
-        h+='<div class="joint-row"><span class="joint-name">'+SHORT[j]+'</span><span class="joint-val">'+v+'</span></div>';
+        if(typeof v==='number')v=v.toFixed(1)+'\u00b0';
+        h+='<div class="joint-row">';
+        h+='<button class="jog-btn" onclick="jogJoint(\''+j+'\',-1)">&minus;</button>';
+        h+='<span class="joint-name">'+SHORT[j]+'</span>';
+        h+='<span class="joint-val">'+v+'</span>';
+        h+='<button class="jog-btn" onclick="jogJoint(\''+j+'\',1)">+</button>';
+        h+='</div>';
       }
     }
     document.getElementById('joints').innerHTML=h;
     let tb=document.getElementById('torque-bar');
-    if(d.torque_enabled){tb.className='torque-status torque-on';tb.textContent='TORQUE ON'}
-    else{tb.className='torque-status torque-off';tb.textContent='TORQUE OFF'}
+    if(d.torque_enabled){tb.className='status-bar torque-on';tb.textContent='TORQUE ON'}
+    else{tb.className='status-bar torque-off';tb.textContent='TORQUE OFF'}
     let tp=document.getElementById('teleop-bar');
-    if(d.teleop_active){tp.className='torque-status teleop-on';tp.textContent='TELEOP ACTIVE'}
-    else{tp.className='torque-status teleop-off';tp.textContent='TELEOP OFF'}
+    if(d.teleop_active){tp.className='status-bar teleop-on';tp.textContent='TELEOP ACTIVE'}
+    else{tp.className='status-bar teleop-off';tp.textContent='TELEOP OFF'}
+    // Recording state
+    if(d.recording_active&&!isRecording){isRecording=true;updateRecBtn()}
+    else if(!d.recording_active&&isRecording){isRecording=false;updateRecBtn()}
     // Agent activity
     let a=d.agent||{};
     let phase=a.phase||'idle';
@@ -504,7 +777,6 @@ function poll(){
     badge.className='phase-badge phase-'+phase;
     badge.textContent=PHASE_LABELS[phase]||phase;
     document.getElementById('activity-detail').textContent=a.detail||'';
-    // Progress bar for alignment
     let prow=document.getElementById('progress-row');
     if(phase==='aligning'&&a.align_max>0){
       prow.style.display='flex';
@@ -512,7 +784,6 @@ function poll(){
       document.getElementById('progress-fill').style.width=pct+'%';
       document.getElementById('progress-text').textContent=a.align_iteration+'/'+a.align_max;
     }else{prow.style.display='none'}
-    // Confirm buttons
     document.getElementById('confirm-section').style.display=a.confirm_pending?'flex':'none';
   }).catch(()=>{
     document.getElementById('dot').className='status-dot err';
@@ -520,6 +791,7 @@ function poll(){
   });
 }
 poll();setInterval(poll,250);
+loadRecordings();setInterval(loadRecordings,5000);
 </script>
 </body></html>"""
 
@@ -721,6 +993,182 @@ def teleop():
         return jsonify({"ok": ok, "message": msg, "teleop_active": teleop_active})
     else:
         return jsonify({"teleop_active": teleop_active})
+
+# ---- Joint Jog ----
+
+@app.route("/move_jog", methods=["POST"])
+def move_jog():
+    """Jog a single joint by a delta amount (relative move)."""
+    if robot is None:
+        return jsonify({"error": "Robot not connected"}), 503
+    data = request.json or {}
+    joint = data.get("joint")
+    delta = float(data.get("delta", 0))
+    if not joint or delta == 0:
+        return jsonify({"error": "Provide 'joint' and 'delta'"}), 400
+    # Read current position
+    joints = get_joint_positions()
+    if joints is None:
+        return jsonify({"error": "Cannot read joint positions"}), 503
+    # Find current value
+    key = None
+    for k in joints:
+        if k.replace(".pos", "") == joint:
+            key = k
+            break
+    if key is None:
+        return jsonify({"error": f"Unknown joint '{joint}'"}), 400
+    current = float(joints[key])
+    target = current + delta
+    try:
+        action = {f"{joint}.pos": target}
+        with robot_lock:
+            robot.send_action(action)
+        return jsonify({"ok": True, "joint": joint, "from": current, "to": target})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---- Teach & Replay ----
+
+def recording_loop():
+    """Background thread: record joint positions at RECORDING_FPS."""
+    global recording_active, recording_frames
+    interval = 1.0 / RECORDING_FPS
+    print(f"[record] Recording at {RECORDING_FPS} fps...")
+    while recording_active:
+        joints = get_joint_positions()
+        if joints:
+            recording_frames.append({
+                "t": time.time(),
+                "joints": {k: float(v) for k, v in joints.items()}
+            })
+        time.sleep(interval)
+    print(f"[record] Stopped — {len(recording_frames)} frames captured")
+
+
+@app.route("/recording/start", methods=["POST"])
+def recording_start():
+    global recording_active, recording_name, recording_frames, recording_thread
+    if recording_active:
+        return jsonify({"ok": False, "error": "Already recording"})
+    if robot is None:
+        return jsonify({"error": "Robot not connected"}), 503
+    data = request.json or {}
+    recording_name = data.get("name", f"rec_{int(time.time())}")
+    recording_frames = []
+    recording_active = True
+    recording_thread = threading.Thread(target=recording_loop, daemon=True)
+    recording_thread.start()
+    return jsonify({"ok": True, "name": recording_name})
+
+
+@app.route("/recording/stop", methods=["POST"])
+def recording_stop():
+    global recording_active, recording_name, recording_frames
+    if not recording_active:
+        return jsonify({"ok": False, "error": "Not recording"})
+    recording_active = False
+    if recording_thread:
+        recording_thread.join(timeout=2)
+    # Save to file
+    if not recording_frames:
+        return jsonify({"ok": False, "error": "No frames recorded"})
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    filepath = os.path.join(RECORDINGS_DIR, f"{recording_name}.json")
+    t0 = recording_frames[0]["t"]
+    save_data = {
+        "name": recording_name,
+        "frames": len(recording_frames),
+        "duration": recording_frames[-1]["t"] - t0,
+        "fps": RECORDING_FPS,
+        "data": [{"t": f["t"] - t0, "joints": f["joints"]} for f in recording_frames]
+    }
+    with open(filepath, "w") as f:
+        json.dump(save_data, f)
+    print(f"[record] Saved {len(recording_frames)} frames to {filepath}")
+    frames_count = len(recording_frames)
+    recording_frames = []
+    return jsonify({"ok": True, "name": recording_name, "frames": frames_count, "file": filepath})
+
+
+@app.route("/recordings")
+def list_recordings():
+    if not os.path.isdir(RECORDINGS_DIR):
+        return jsonify({"recordings": []})
+    recordings = []
+    for fname in sorted(os.listdir(RECORDINGS_DIR)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(RECORDINGS_DIR, fname)) as f:
+                data = json.load(f)
+            recordings.append({
+                "name": data.get("name", fname.replace(".json", "")),
+                "frames": data.get("frames", 0),
+                "duration": data.get("duration", 0),
+            })
+        except Exception:
+            continue
+    return jsonify({"recordings": recordings})
+
+
+@app.route("/recording/replay", methods=["POST"])
+def recording_replay():
+    if robot is None:
+        return jsonify({"error": "Robot not connected"}), 503
+    data = request.json or {}
+    name = data.get("name")
+    if not name:
+        return jsonify({"error": "Provide 'name'"}), 400
+    filepath = os.path.join(RECORDINGS_DIR, f"{name}.json")
+    if not os.path.exists(filepath):
+        return jsonify({"error": f"Recording '{name}' not found"}), 404
+    try:
+        with open(filepath) as f:
+            rec = json.load(f)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load: {e}"}), 500
+    frames = rec.get("data", [])
+    if not frames:
+        return jsonify({"error": "Recording has no frames"}), 400
+    # Replay in a background thread
+    def do_replay():
+        print(f"[replay] Playing '{name}' ({len(frames)} frames)...")
+        agent_state["phase"] = "replaying"
+        agent_state["detail"] = f"Replaying '{name}'..."
+        prev_t = 0
+        for i, frame in enumerate(frames):
+            dt = frame["t"] - prev_t
+            if dt > 0 and i > 0:
+                time.sleep(dt)
+            prev_t = frame["t"]
+            try:
+                action = {k: float(v) for k, v in frame["joints"].items()}
+                with robot_lock:
+                    robot.send_action(action)
+            except Exception as e:
+                print(f"[replay] Frame {i} error: {e}")
+                break
+        agent_state["phase"] = "idle"
+        agent_state["detail"] = f"Replay '{name}' complete"
+        print(f"[replay] Done")
+    threading.Thread(target=do_replay, daemon=True).start()
+    return jsonify({"ok": True, "name": name, "frames": len(frames)})
+
+
+@app.route("/recording/delete", methods=["POST"])
+def recording_delete():
+    data = request.json or {}
+    name = data.get("name")
+    if not name:
+        return jsonify({"error": "Provide 'name'"}), 400
+    filepath = os.path.join(RECORDINGS_DIR, f"{name}.json")
+    if not os.path.exists(filepath):
+        return jsonify({"error": f"Recording '{name}' not found"}), 404
+    os.remove(filepath)
+    return jsonify({"ok": True, "name": name})
+
 
 # ---- Main ----
 if __name__ == "__main__":

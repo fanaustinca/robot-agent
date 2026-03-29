@@ -33,15 +33,13 @@ class C:
     BOLD = "\033[1m"
     RESET = "\033[0m"
 
-# ---- Joint Name Aliases ----
-JOINT_ALIASES = {
-    "sp": "shoulder_pan", "pan": "shoulder_pan",
-    "sl": "shoulder_lift", "lift": "shoulder_lift",
-    "ef": "elbow_flex", "elbow": "elbow_flex",
-    "wf": "wrist_flex", "flex": "wrist_flex",
-    "wr": "wrist_roll", "roll": "wrist_roll",
-    "g": "gripper", "grip": "gripper",
-}
+# ---- Shared Constants ----
+from constants import (
+    CROSSHAIR_OFFSET_X, CROSSHAIR_OFFSET_Y, PX_PER_DEG,
+    SLOW_MOVE_STEPS, SLOW_MOVE_DELAY,
+    SHOULDER_LIFT_MAX, SHOULDER_LIFT_MIN,
+    JOINT_ALIASES, PRESETS as SHARED_PRESETS,
+)
 
 def resolve_joint(name):
     """Resolve a joint alias to its full name."""
@@ -57,26 +55,9 @@ MIN_DELTA_START = 15  # min movement for first 5 iterations
 MIN_DELTA_STEP  = 3   # degrees to drop per iteration after iteration 5
 MAX_DELTA = 20
 ALIGN_SETTLE_DELAY = 0.6  # seconds to wait after each alignment move
-SHOULDER_LIFT_MAX =  50   # max up (agent space)
-SHOULDER_LIFT_MIN = -65   # max down — floor protection
 
-HOME_POSITION = {
-    "shoulder_pan": 0,
-    "shoulder_lift": 0,
-    "elbow_flex": 0,
-    "wrist_flex": 0,
-    "wrist_roll": -90,
-    "gripper": 0,
-}
-
-DEFAULT_POSITION = {
-    "shoulder_pan": 0,
-    "shoulder_lift": 0,
-    "elbow_flex": 0,
-    "wrist_flex": 0,
-    "wrist_roll": 0,
-    "gripper": 0,
-}
+HOME_POSITION = SHARED_PRESETS["home"]
+DEFAULT_POSITION = SHARED_PRESETS["default"]
 
 # Drop position (agent space — shoulder_lift inverted from hardware 10.46)
 DROP_POSITION = {
@@ -93,10 +74,6 @@ CALIB_STEP = 1.0          # degrees per calibration step
 CALIB_DELAY = 0.15        # seconds between calibration steps
 CALIB_STALL_THRESHOLD = 3.0  # if actual vs commanded differs by this much, we hit floor
 CALIB_LIFT_OFFSET = 5     # degrees to raise off floor before gripping
-CROSSHAIR_OFFSET_Y = 38   # pixels down from center — must match robot_server.py
-CROSSHAIR_OFFSET_X = 30    # pixels right from center — must match robot_server.py
-SLOW_MOVE_STEPS = 8      # number of interpolation steps for slow moves
-SLOW_MOVE_DELAY = 0.08   # seconds between steps
 
 
 ALIGNER_SYSTEM = """You are navigating a robot arm gripper to a target object using camera feedback.
@@ -287,7 +264,7 @@ def get_wrist_snapshot():
         cv2.line(img, (cx - 20, cy), (cx + 20, cy), (0, 0, 0), 2)
         cv2.line(img, (cx, cy - 20), (cx, cy + 20), (0, 0, 0), 2)
         # Degree scale ruler (10° ≈ 80px)
-        px_per_deg = 8
+        px_per_deg = PX_PER_DEG
         ruler_y = h - 14
         ruler_cx = w // 2
         ruler_half = px_per_deg * 10
@@ -453,6 +430,10 @@ def print_help():
     print(f"  {C.CYAN}/maincam{C.RESET} <top|wrist>  — set free-mode camera")
     print(f"  {C.CYAN}/calib{C.RESET}               — calibrate floor distance for pickup")
     print(f"  {C.CYAN}/teleop{C.RESET} [start|stop]  — leader arm teleoperation")
+    print(f"  {C.CYAN}/record{C.RESET} [name]       — start recording joint trajectory")
+    print(f"  {C.CYAN}/stop-record{C.RESET}          — stop recording and save")
+    print(f"  {C.CYAN}/replay{C.RESET} <name>        — replay a saved recording")
+    print(f"  {C.CYAN}/recordings{C.RESET}            — list saved recordings")
     print(f"  {C.CYAN}/doctor{C.RESET}              — run full diagnostics")
     print(f"\n{C.BOLD}Joint aliases:{C.RESET} {C.DIM}sp sl ef wf wr g  (or: pan lift elbow flex roll grip){C.RESET}")
     print(f"{C.BOLD}Quit:{C.RESET} quit / exit / q\n")
@@ -1049,6 +1030,62 @@ def run_agent():
                         print(f"{C.RED}[teleop]{C.RESET} Error: {e}")
                 else:
                     print(f"{C.YELLOW}[teleop]{C.RESET} Usage: /teleop [start [port] | stop]")
+
+            elif cmd == "/record":
+                name = parts[1] if len(parts) > 1 else f"rec_{int(time.time())}"
+                try:
+                    r = requests.post(f"{ROBOT_SERVER}/recording/start", json={"name": name}, timeout=5)
+                    data = r.json()
+                    if data.get("ok"):
+                        print(f"{C.GREEN}[record]{C.RESET} Recording started: {C.BOLD}{name}{C.RESET}")
+                        print(f"  {C.DIM}Type /stop-record to save{C.RESET}")
+                    else:
+                        print(f"{C.RED}[record]{C.RESET} {data.get('error', 'Unknown error')}")
+                except Exception as e:
+                    print(f"{C.RED}[record]{C.RESET} Error: {e}")
+
+            elif cmd in ("/stop-record", "/stoprec"):
+                try:
+                    r = requests.post(f"{ROBOT_SERVER}/recording/stop", json={}, timeout=5)
+                    data = r.json()
+                    if data.get("ok"):
+                        print(f"{C.GREEN}[record]{C.RESET} Saved: {C.BOLD}{data.get('name')}{C.RESET} ({data.get('frames')} frames)")
+                    else:
+                        print(f"{C.RED}[record]{C.RESET} {data.get('error', 'Unknown error')}")
+                except Exception as e:
+                    print(f"{C.RED}[record]{C.RESET} Error: {e}")
+
+            elif cmd == "/replay":
+                if len(parts) < 2:
+                    print(f"{C.YELLOW}[replay]{C.RESET} Usage: /replay <name>")
+                else:
+                    name = parts[1]
+                    try:
+                        r = requests.post(f"{ROBOT_SERVER}/recording/replay", json={"name": name}, timeout=5)
+                        data = r.json()
+                        if data.get("ok"):
+                            print(f"{C.GREEN}[replay]{C.RESET} Playing: {C.BOLD}{name}{C.RESET} ({data.get('frames')} frames)")
+                        else:
+                            print(f"{C.RED}[replay]{C.RESET} {data.get('error', 'Unknown error')}")
+                    except Exception as e:
+                        print(f"{C.RED}[replay]{C.RESET} Error: {e}")
+
+            elif cmd in ("/recordings", "/recs"):
+                try:
+                    r = requests.get(f"{ROBOT_SERVER}/recordings", timeout=5)
+                    data = r.json()
+                    recs = data.get("recordings", [])
+                    if not recs:
+                        print(f"{C.DIM}[recordings] No recordings saved{C.RESET}")
+                    else:
+                        print(f"\n{C.BOLD}Saved Recordings:{C.RESET}")
+                        for rec in recs:
+                            dur = f"{rec.get('duration', 0):.1f}s"
+                            frames = rec.get('frames', 0)
+                            print(f"  {C.CYAN}{rec['name']:20s}{C.RESET} {frames:5d} frames  {dur}")
+                        print()
+                except Exception as e:
+                    print(f"{C.RED}[recordings]{C.RESET} Error: {e}")
 
             else:
                 print(f"{C.YELLOW}Unknown command: {cmd}{C.RESET} — type {C.CYAN}/help{C.RESET} for available commands")
