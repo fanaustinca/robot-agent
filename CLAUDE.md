@@ -10,10 +10,9 @@ A robot control system for the SO-101 arm with two AI agents (Gemini and Claude)
 Agent (Gemini or Claude)  ──HTTP──>  robot_server.py (Flask :7878)  ──>  SO-101 arm + 2 cameras
 ```
 
-- **robot_server.py** — Flask server on port 7878. Exposes `/status`, `/snapshot/{top,wrist}`, `/stream`, `/move`, `/move_jog`, `/move_preset`, `/enable`, `/teleop`, `/agent_state`, `/confirm_grip`, `/recording/*`, `/recordings`. Bridges serial robot + USB cameras. Serves a live web dashboard.
+- **robot_server.py** — Flask server on port 7878. Exposes `/status`, `/snapshot/{top,wrist}`, `/stream`, `/move`, `/move_preset`, `/enable`, `/teleop`, `/agent_state`, `/confirm_grip`. Bridges serial robot + USB cameras. Serves a live web dashboard.
 - **gemini_robot_agent.py** — Two modes: (1) **pick-up mode** with top-camera prescan, visual alignment loop, floor calibration, and auto-confirm grip, (2) **free-agent mode** for general commands. Uses `gemini-3-flash-preview`.
 - **claude_robot_agent.py** — Agentic tool-use loop with 5 tools (get_status, snapshot, move_joints, move_preset, confirm_move). Uses `claude-sonnet-4-6`.
-- **constants.py** — Shared constants (crosshair offsets, image sizes, joint names, presets, etc.) imported by both the server and agents. Single source of truth to prevent drift.
 
 ## Running
 
@@ -46,7 +45,7 @@ Dashboard (live cameras + controls): http://localhost:7878/stream
 ## Key Details
 
 - **Joint space inversion**: Agent uses positive shoulder_lift = up; hardware inverts this. Conversion in `move_joints()` / `hardware_to_agent()`.
-- **Crosshair offsets**: `CROSSHAIR_OFFSET_X=30, CROSSHAIR_OFFSET_Y=38` defined in `constants.py` (single source of truth). Marks the gripper closing point on the wrist camera.
+- **Crosshair offsets**: `CROSSHAIR_OFFSET_X=30, CROSSHAIR_OFFSET_Y=38` in both server and gemini agent — must stay in sync. This marks the gripper closing point on the wrist camera.
 - **Degree scale ruler**: Purple ruler on wrist camera showing 1°/5°/10° markings (8px per degree, 10° ≈ 2x crosshair span).
 - **Safety bounds**: shoulder_lift clamped to [-65, 50] degrees (agent space).
 - **Slow moves**: 8-step interpolation with 0.08s delays to avoid jerky motion.
@@ -56,14 +55,6 @@ Dashboard (live cameras + controls): http://localhost:7878/stream
 - **Startup health check**: Agent verifies server, arm, and cameras on boot with pass/fail summary.
 - **Colored terminal output**: ANSI colors via `C` class — green=success, red=error, yellow=warning, blue=in-progress, cyan=info.
 - **Joint aliases**: Short names (`sp`, `sl`, `ef`, `wf`, `wr`, `g` or `pan`, `lift`, `elbow`, `flex`, `roll`, `grip`) work in `/move`, `/pos`, `/torque-*` commands.
-
-## Teach & Replay
-
-- **Record**: Start recording during teleop or manual control — captures joint positions at 20 fps.
-- **Save**: Recordings saved as JSON files in `recordings/` directory with timing data.
-- **Replay**: Plays back recorded trajectory with original timing. Runs in background thread.
-- **Dashboard**: Full record/stop/replay/delete controls in the Teach & Replay card.
-- **CLI**: `/record [name]`, `/stop-record`, `/replay <name>`, `/recordings`
 
 ## Pickup Sequence (7 steps)
 
@@ -93,13 +84,11 @@ Dashboard (live cameras + controls): http://localhost:7878/stream
 The `/stream` endpoint serves a full dashboard with:
 - Side-by-side camera streams (top + wrist)
 - **Agent Activity** panel — live phase badge, detail text, alignment progress bar with Done button, grip confirm/cancel buttons
-- Joint positions with **jog +/- buttons** (configurable step: 1/5/10/20 degrees)
+- Joint positions (updates 4x/sec)
 - Torque ON/OFF toggle
 - Gripper open/close buttons
 - Home/Default/Rest preset buttons
 - Teleop start/stop with status indicator
-- **Teach & Replay** panel — record, save, list, replay, delete recordings
-- **Help panel** — collapsible reference for all dashboard controls, CLI commands, and tips
 
 ## Dependencies
 
@@ -129,10 +118,6 @@ flask, opencv-python, lerobot, google-genai>=1.51.0, anthropic
 | `/maincam <top\|wrist>` | | Set free-mode camera |
 | `/calib` | | Calibrate floor distance |
 | `/teleop [start\|stop]` | | Leader arm teleoperation |
-| `/record [name]` | | Start recording joint trajectory |
-| `/stop-record` | `/stoprec` | Stop recording and save |
-| `/replay <name>` | | Replay a saved recording |
-| `/recordings` | `/recs` | List saved recordings |
 | `/doctor` | | Run full diagnostics |
 | `/torque-h` | `/t-h` | Torque help |
 | `/move-h` | | Move help |
@@ -149,18 +134,11 @@ flask, opencv-python, lerobot, google-genai>=1.51.0, anthropic
 | POST | `/move_preset` | Move to preset `{"pose": "home"}` |
 | POST | `/enable` | Torque `{"enabled": true/false}` |
 | POST | `/teleop` | Teleop `{"action": "start/stop"}` |
-| POST | `/move_jog` | Relative joint move `{"joint": name, "delta": degrees}` |
 | POST | `/agent_state` | Agent pushes activity state |
 | POST | `/confirm_grip` | Dashboard sends grip confirm |
-| POST | `/recording/start` | Start recording `{"name": "my_recording"}` |
-| POST | `/recording/stop` | Stop recording and save to file |
-| GET | `/recordings` | List all saved recordings |
-| POST | `/recording/replay` | Replay recording `{"name": "my_recording"}` |
-| POST | `/recording/delete` | Delete recording `{"name": "my_recording"}` |
 
 ## File Sizes
 
-- robot_server.py — ~1190 lines
-- gemini_robot_agent.py — ~1220 lines
+- robot_server.py — ~740 lines
+- gemini_robot_agent.py — ~1180 lines
 - claude_robot_agent.py — ~305 lines
-- constants.py — ~60 lines
