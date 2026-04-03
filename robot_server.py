@@ -575,8 +575,8 @@ function poll(){
           h+='<div class="joint-row">';
           h+='<span class="joint-name">'+SHORT[j]+'</span>';
           h+='<span class="joint-deg" id="deg-'+j+'">0.0\u00b0</span>';
-          h+='<input class="joint-slider" id="sld-'+j+'" type="range" min="'+r[0]+'" max="'+r[1]+'" step="0.5" value="0" oninput="onSlider(\''+j+'\')">';
-          h+='<input class="joint-input" id="inp-'+j+'" type="number" step="any" value="0" onkeydown="if(event.key===\'Enter\')onInput(\''+j+'\')" onchange="onInput(\''+j+'\')">';
+          h+='<input class="joint-slider" id="sld-'+j+'" type="range" min="'+r[0]+'" max="'+r[1]+'" step="0.5" value="0" oninput="onSlider(\\''+j+'\\')">';
+          h+='<input class="joint-input" id="inp-'+j+'" type="number" step="any" value="0" onkeydown="if(event.key===\\'Enter\\')onInput(\\''+j+'\\')" onchange="onInput(\\''+j+'\\')">';
           h+='</div>';
         }
         container.innerHTML=h;
