@@ -173,6 +173,23 @@ def push_state(phase, detail="", align_iteration=0, align_max=0, confirm_pending
         pass
 
 
+def push_chat(text, role="agent"):
+    """Push a message to the chat log on the server (syncs with dashboard)."""
+    try:
+        requests.post(f"{ROBOT_SERVER}/chat/push", json={"text": text, "role": role}, timeout=2)
+    except Exception:
+        pass
+
+
+def get_pending_chat():
+    """Check for messages submitted from the dashboard. Returns list of strings."""
+    try:
+        r = requests.get(f"{ROBOT_SERVER}/chat/pending", timeout=2)
+        return r.json().get("messages", [])
+    except Exception:
+        return []
+
+
 def wait_for_confirm(prompt, timeout=5, default="y"):
     """Wait for confirmation from either terminal (timed_confirm) or dashboard.
     Dashboard confirm takes priority if received before terminal timeout."""
@@ -563,6 +580,7 @@ def run_free_agent(client, user_input):
     )
 
     print(f"{C.BOLD}Gemini:{C.RESET} {response.text}\n")
+    push_chat(response.text, role="agent")
 
     # Parse and execute any action in the response
     match = re.search(r'\{.*\}', response.text, re.DOTALL)
@@ -792,18 +810,42 @@ def run_agent():
 
     startup_health_check()
 
+    prompt_shown = False
     while True:
-        try:
-            user_input = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
+        # Show prompt if not yet shown
+        if not prompt_shown:
+            print("You: ", end="", flush=True)
+            prompt_shown = True
+
+        # Check for dashboard messages first
+        pending = get_pending_chat()
+        if pending:
+            user_input = pending[0].strip()
+            # Overwrite the "You: " prompt with the dashboard message
+            print(f"\rYou {C.DIM}(dashboard){C.RESET}: {user_input}")
+            prompt_shown = False
+        else:
+            try:
+                # Non-blocking check: if stdin has data, read it; otherwise briefly poll dashboard
+                if select.select([sys.stdin], [], [], 0.3)[0]:
+                    user_input = sys.stdin.readline().strip()
+                    prompt_shown = False
+                    if not user_input:
+                        continue
+                else:
+                    continue
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                break
 
         if not user_input:
             continue
         if user_input.lower() in ("quit", "exit", "q"):
             print("Goodbye!")
             break
+
+        # Push user message to chat log
+        push_chat(user_input, role="user")
 
         # ---- Direct commands (no AI) ----
         if user_input.startswith("/"):
@@ -812,6 +854,7 @@ def run_agent():
 
             if cmd in ("/help", "/h"):
                 print_help()
+                push_chat("Showing help — see CLI for full output.", role="system")
 
             elif cmd in ("/home",):
                 print(f"{C.BLUE}[home]{C.RESET} Moving to home position (slow)...")
@@ -821,6 +864,7 @@ def run_agent():
                 move_joints_slow(HOME_POSITION)
                 _commanded.update(HOME_POSITION)
                 print(f"{C.GREEN}[home]{C.RESET} Done.")
+                push_chat("Moved to home position.", role="agent")
 
             elif cmd in ("/default",):
                 print(f"{C.BLUE}[default]{C.RESET} Moving to default position (slow)...")
@@ -830,6 +874,7 @@ def run_agent():
                 move_joints_slow(DEFAULT_POSITION)
                 _commanded.update(DEFAULT_POSITION)
                 print(f"{C.GREEN}[default]{C.RESET} Done.")
+                push_chat("Moved to default position.", role="agent")
 
             elif cmd in ("/drop",):
                 print(f"{C.BLUE}[drop]{C.RESET} Moving to drop position (slow)...")
@@ -839,6 +884,7 @@ def run_agent():
                 move_joints_slow(DROP_POSITION)
                 _commanded.update(DROP_POSITION)
                 print(f"{C.GREEN}[drop]{C.RESET} Done.")
+                push_chat("Moved to drop position.", role="agent")
 
             elif cmd in ("/torque-h", "/t-h"):
                 print(f"  {C.CYAN}/torque-on{C.RESET}  [motor]  — enable torque (all or specific)")
@@ -921,6 +967,7 @@ def run_agent():
                             print(f"{C.RED}[move]{C.RESET} Error: {result['error']}")
                         else:
                             print(f"{C.GREEN}[move]{C.RESET} {joint} -> {deg}°")
+                            push_chat(f"Moved {joint} to {deg}°", role="agent")
                     except ValueError:
                         print(f"{C.RED}[move]{C.RESET} Invalid degree value: {parts[2]}")
 
@@ -1052,10 +1099,11 @@ def run_agent():
 
             else:
                 print(f"{C.YELLOW}Unknown command: {cmd}{C.RESET} — type {C.CYAN}/help{C.RESET} for available commands")
+                push_chat(f"Unknown command: {cmd} — type /help for commands", role="system")
             continue
 
-        print(f"{C.DIM}[classify]{C.RESET} Checking for pickup keywords...")
         if is_pickup_prompt(client, user_input):
+            push_chat(f"Starting pickup sequence for: {user_input}", role="system")
             # Auto-calibrate on first pickup if not yet done
             if _floor_drop is None:
                 print(f"{C.YELLOW}[calib]{C.RESET} Not calibrated yet — running auto-calibration...")
@@ -1165,9 +1213,11 @@ def run_agent():
                 _commanded["gripper"] = 100
                 push_state("done", "Pickup complete!")
                 print(f"      {C.GREEN}{C.BOLD}Dropped!{C.RESET}")
+                push_chat("Pickup complete! Object dropped.", role="agent")
             else:
                 push_state("idle", "Pickup cancelled")
                 print(f"      {C.YELLOW}Skipped.{C.RESET}")
+                push_chat("Pickup cancelled.", role="agent")
             # Reset to idle after a moment
             time.sleep(2)
             push_state("idle")

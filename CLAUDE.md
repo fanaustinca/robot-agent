@@ -89,6 +89,7 @@ The `/stream` endpoint serves a full dashboard with:
 - Gripper open/close buttons
 - Home/Default/Rest preset buttons
 - Teleop start/stop with status indicator
+- **Chat panel** — synced with CLI; send commands or natural language from the dashboard, see agent responses in real time
 
 ## Dependencies
 
@@ -136,9 +137,20 @@ flask, opencv-python, lerobot, google-genai>=1.51.0, anthropic
 | POST | `/teleop` | Teleop `{"action": "start/stop"}` |
 | POST | `/agent_state` | Agent pushes activity state |
 | POST | `/confirm_grip` | Dashboard sends grip confirm |
+| GET | `/chat?since=ID` | Get chat messages since given ID |
+| POST | `/chat` | Dashboard sends chat message `{"text": "..."}` |
+| POST | `/chat/push` | Agent pushes message `{"text": "...", "role": "agent\|user\|system"}` |
+| GET | `/chat/pending` | Agent polls for dashboard-submitted messages |
+
+## Chat Sync
+
+- The dashboard chat and CLI share the same message log via the server.
+- Messages sent from the dashboard are queued (`/chat/pending`) and picked up by the agent's input loop.
+- The agent pushes its responses, user inputs, and system events to `/chat/push` so the dashboard sees them.
+- ANSI color codes are stripped when rendering in the dashboard.
 
 ## File Sizes
 
-- robot_server.py — ~740 lines
-- gemini_robot_agent.py — ~1180 lines
+- robot_server.py — ~870 lines
+- gemini_robot_agent.py — ~1230 lines
 - claude_robot_agent.py — ~305 lines

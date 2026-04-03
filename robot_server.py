@@ -71,6 +71,14 @@ agent_state = {
     "confirm_result": None,   # "y" or "n" — set by dashboard, read by agent
 }
 
+# ---- Chat Log (synced between CLI agent and dashboard) ----
+# Each entry: {"role": "user"|"agent"|"system", "text": str, "ts": float, "id": int}
+chat_log = []
+chat_id_counter = 0
+chat_lock = threading.Lock()
+# Messages submitted from dashboard, waiting for agent to pick up
+chat_pending = []
+
 def find_port_by_serial(serial_number):
     """Find the serial port whose USB serial number matches. Returns device path or None."""
     try:
@@ -356,11 +364,31 @@ def stream_index():
 body{background:#111;color:#eee;font-family:-apple-system,system-ui,sans-serif;padding:16px}
 h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
 .layout{display:flex;gap:16px;flex-wrap:wrap}
-.cameras{display:flex;gap:12px;flex:1;min-width:0}
+.left-col{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+.cameras{display:flex;gap:12px}
 .cam-box{flex:1;min-width:0}
 .cam-box p{text-align:center;font-size:14px;color:#888;margin-bottom:4px}
 .cam-box img{width:100%;border-radius:6px;background:#000}
 .panel{width:300px;flex-shrink:0;display:flex;flex-direction:column;gap:12px}
+.chat-card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px;flex:1;display:flex;flex-direction:column;min-height:200px}
+.chat-card h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.chat-log{flex:1;overflow-y:auto;max-height:300px;display:flex;flex-direction:column;gap:6px;padding:4px 0;
+          scrollbar-width:thin;scrollbar-color:#333 transparent}
+.chat-log::-webkit-scrollbar{width:4px}
+.chat-log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
+.chat-msg{padding:6px 10px;border-radius:8px;font-size:13px;line-height:1.4;max-width:90%;word-wrap:break-word;white-space:pre-wrap}
+.chat-msg.user{background:#1565c0;color:#e3f2fd;align-self:flex-end;border-bottom-right-radius:2px}
+.chat-msg.agent{background:#2a2a2a;color:#e0e0e0;align-self:flex-start;border-bottom-left-radius:2px}
+.chat-msg.system{background:#1a1a2a;color:#888;align-self:center;font-size:12px;font-style:italic}
+.chat-msg .msg-source{font-size:10px;opacity:0.5;margin-top:2px}
+.chat-input-row{display:flex;gap:6px;margin-top:8px}
+.chat-input{flex:1;padding:8px 12px;border:1px solid #444;border-radius:6px;background:#222;color:#eee;
+            font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.chat-input:focus{border-color:#42a5f5}
+.chat-send{padding:8px 16px;border:1px solid #388e3c;border-radius:6px;background:#222;color:#66bb6a;
+           font-size:13px;cursor:pointer;font-weight:600;transition:background .15s}
+.chat-send:hover{background:#1b5e20}
+.chat-send:active{background:#2e7d32}
 .card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px}
 .card h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
 .joint-row{display:flex;justify-content:space-between;font-size:13px;padding:2px 0;font-family:'SF Mono',monospace}
@@ -408,9 +436,20 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
 <h1>SO-101 Dashboard</h1>
 <div id="conn"><span class="status-dot" id="dot"></span><span id="conn-text">Connecting...</span></div>
 <div class="layout">
-  <div class="cameras">
-    <div class="cam-box"><p>Top</p><img src="/stream/top"></div>
-    <div class="cam-box"><p>Wrist</p><img src="/stream/wrist"></div>
+  <div class="left-col">
+    <div class="cameras">
+      <div class="cam-box"><p>Top</p><img src="/stream/top"></div>
+      <div class="cam-box"><p>Wrist</p><img src="/stream/wrist"></div>
+    </div>
+    <div class="chat-card">
+      <h2>Chat</h2>
+      <div class="chat-log" id="chat-log"></div>
+      <div class="chat-input-row">
+        <input class="chat-input" id="chat-input" type="text" placeholder="Type a message or command..." autocomplete="off"
+               onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="chat-send" onclick="sendChat()">Send</button>
+      </div>
+    </div>
   </div>
   <div class="panel">
     <div class="card activity-card">
@@ -520,6 +559,39 @@ function poll(){
   });
 }
 poll();setInterval(poll,250);
+
+// ---- Chat ----
+let lastChatId=0;
+function sendChat(){
+  let inp=document.getElementById('chat-input');
+  let text=inp.value.trim();
+  if(!text)return;
+  inp.value='';
+  fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})});
+}
+function pollChat(){
+  fetch('/chat?since='+lastChatId).then(r=>r.json()).then(d=>{
+    let log=document.getElementById('chat-log');
+    let wasAtBottom=log.scrollHeight-log.scrollTop-log.clientHeight<30;
+    for(let m of d.messages){
+      if(m.id<=lastChatId)continue;
+      lastChatId=m.id;
+      let div=document.createElement('div');
+      div.className='chat-msg '+m.role;
+      // Strip ANSI codes for display
+      let clean=m.text.replace(/\\x1b\\[[0-9;]*m/g,'').replace(/\\033\\[[0-9;]*m/g,'');
+      div.textContent=clean;
+      if(m.source==='dashboard'&&m.role==='user'){
+        let src=document.createElement('div');
+        src.className='msg-source';src.textContent='from dashboard';
+        div.appendChild(src);
+      }
+      log.appendChild(div);
+    }
+    if(wasAtBottom&&d.messages.length>0)log.scrollTop=log.scrollHeight;
+  }).catch(()=>{});
+}
+pollChat();setInterval(pollChat,500);
 </script>
 </body></html>"""
 
@@ -721,6 +793,58 @@ def teleop():
         return jsonify({"ok": ok, "message": msg, "teleop_active": teleop_active})
     else:
         return jsonify({"teleop_active": teleop_active})
+
+# ---- Chat ----
+
+@app.route("/chat", methods=["GET"])
+def get_chat():
+    """Get chat messages. Pass ?since=ID to get only new messages."""
+    since = int(request.args.get("since", 0))
+    with chat_lock:
+        msgs = [m for m in chat_log if m["id"] > since]
+    return jsonify({"messages": msgs})
+
+@app.route("/chat", methods=["POST"])
+def post_chat():
+    """Dashboard sends a chat message. Queued for the agent to pick up."""
+    global chat_id_counter
+    data = request.json or {}
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "Empty message"}), 400
+    with chat_lock:
+        chat_id_counter += 1
+        msg = {"role": "user", "text": text, "ts": time.time(), "id": chat_id_counter, "source": "dashboard"}
+        chat_log.append(msg)
+        chat_pending.append(text)
+    return jsonify({"ok": True, "id": msg["id"]})
+
+@app.route("/chat/push", methods=["POST"])
+def push_chat():
+    """Agent pushes a message to the chat log (for sync with dashboard)."""
+    global chat_id_counter
+    data = request.json or {}
+    text = data.get("text", "")
+    role = data.get("role", "agent")
+    if not text:
+        return jsonify({"error": "Empty message"}), 400
+    with chat_lock:
+        chat_id_counter += 1
+        msg = {"role": role, "text": text, "ts": time.time(), "id": chat_id_counter}
+        chat_log.append(msg)
+        # Keep chat log to last 200 messages
+        if len(chat_log) > 200:
+            chat_log[:] = chat_log[-200:]
+    return jsonify({"ok": True, "id": msg["id"]})
+
+@app.route("/chat/pending", methods=["GET"])
+def get_pending():
+    """Agent polls for messages submitted from the dashboard."""
+    with chat_lock:
+        msgs = list(chat_pending)
+        chat_pending.clear()
+    return jsonify({"messages": msgs})
+
 
 # ---- Main ----
 if __name__ == "__main__":
