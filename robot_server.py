@@ -23,6 +23,17 @@ import time
 from io import BytesIO
 from flask import Flask, jsonify, request
 
+# ---- Terminal Colors ----
+class C:
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
 # ---- Config ----
 PORT = 7878
 SNAPSHOT_WIDTH = 256
@@ -85,10 +96,10 @@ def find_port_by_serial(serial_number):
         import serial.tools.list_ports
         for port in serial.tools.list_ports.comports():
             if port.serial_number == serial_number:
-                print(f"[robot] Found serial {serial_number} at {port.device}")
+                print(f"{C.GREEN}[robot]{C.RESET} Found serial {serial_number} at {C.CYAN}{port.device}{C.RESET}")
                 return port.device
     except Exception as e:
-        print(f"[robot] Serial lookup failed: {e}")
+        print(f"{C.RED}[robot]{C.RESET} Serial lookup failed: {e}")
     return None
 
 def autodetect_serial_port():
@@ -96,7 +107,7 @@ def autodetect_serial_port():
     import glob
     candidates = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
     if candidates:
-        print(f"[robot] Auto-detected serial ports: {candidates}")
+        print(f"{C.CYAN}[robot]{C.RESET} Auto-detected serial ports: {candidates}")
         return candidates[0]
     return None
 
@@ -109,7 +120,7 @@ def find_camera_index_by_name(name):
                 dev_name = f.read().strip()
             if name.lower() in dev_name.lower():
                 idx = int(path.split("/video")[2].split("/")[0])
-                print(f"[camera] Found '{dev_name}' at index {idx}")
+                print(f"{C.GREEN}[camera]{C.RESET} Found '{dev_name}' at index {idx}")
                 return idx
         except Exception:
             continue
@@ -126,7 +137,7 @@ def autodetect_cameras():
             if ret:
                 found.append(idx)
         cap.release()
-    print(f"[camera] Auto-detected camera indices: {found}")
+    print(f"{C.CYAN}[camera]{C.RESET} Auto-detected camera indices: {found}")
     return found
 
 def get_motor_ids():
@@ -160,10 +171,10 @@ def init_robot():
     # Priority: serial number lookup → configured port → autodetect
     port = find_port_by_serial(ROBOT_SERIAL)
     if port is None:
-        print(f"[robot] Serial {ROBOT_SERIAL} not found, falling back to {ROBOT_PORT}")
+        print(f"{C.YELLOW}[robot]{C.RESET} Serial {ROBOT_SERIAL} not found, falling back to {ROBOT_PORT}")
         port = ROBOT_PORT
     if not os.path.exists(port):
-        print(f"[robot] {port} not found, auto-detecting...")
+        print(f"{C.YELLOW}[robot]{C.RESET} {port} not found, auto-detecting...")
         port = autodetect_serial_port() or ROBOT_PORT
     try:
         from lerobot.robots.so_follower.so_follower import SOFollower
@@ -171,17 +182,17 @@ def init_robot():
         config = SOFollowerRobotConfig(port=port)
         robot = SOFollower(config)
         robot.connect(calibrate=False)
-        print(f"[robot] Connected to SO-101 on {port}")
+        print(f"{C.GREEN}[robot]{C.RESET} Connected to SO-101 on {C.CYAN}{port}{C.RESET}")
         # Enable torque so servos respond to position commands
         try:
             robot.bus.enable_torque()
             torque_enabled = True
-            print(f"[robot] Torque enabled")
+            print(f"{C.GREEN}[robot]{C.RESET} Torque enabled")
         except Exception as te:
-            print(f"[robot] Torque enable failed: {te} — arm may not move")
+            print(f"{C.RED}[robot]{C.RESET} Torque enable failed: {te} — arm may not move")
     except Exception as e:
-        print(f"[robot] WARNING: Could not connect to arm: {e}")
-        print("[robot] Running in camera-only mode")
+        print(f"{C.RED}[robot]{C.RESET} Could not connect to arm: {e}")
+        print(f"{C.YELLOW}[robot]{C.RESET} Running in camera-only mode")
         robot = None
 
 def init_cameras():
@@ -191,12 +202,12 @@ def init_cameras():
     top_idx = find_camera_index_by_name(CAMERA_TOP_NAME) if CAMERA_TOP_NAME else None
     if top_idx is None:
         top_idx = CAMERA_TOP_IDX
-        print(f"[camera] Name lookup failed for top, using index {top_idx}")
+        print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for top, using index {top_idx}")
 
     wrist_idx = find_camera_index_by_name(CAMERA_WRIST_NAME) if CAMERA_WRIST_NAME else None
     if wrist_idx is None:
         wrist_idx = CAMERA_WRIST_IDX
-        print(f"[camera] Name lookup failed for wrist, using index {wrist_idx}")
+        print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for wrist, using index {wrist_idx}")
 
     # Auto-detect if resolved indices still don't open
     needs_autodetect = []
@@ -208,14 +219,14 @@ def init_cameras():
             needs_autodetect.append(name)
 
     if needs_autodetect:
-        print(f"[camera] Could not open configured indices for {needs_autodetect}, auto-detecting...")
+        print(f"{C.YELLOW}[camera]{C.RESET} Could not open configured indices for {needs_autodetect}, auto-detecting...")
         available = autodetect_cameras()
         if len(available) >= 2:
             top_idx, wrist_idx = available[0], available[1]
-            print(f"[camera] Using auto-detected: top={top_idx}, wrist={wrist_idx}")
+            print(f"{C.CYAN}[camera]{C.RESET} Using auto-detected: top={top_idx}, wrist={wrist_idx}")
         elif len(available) == 1:
             top_idx = wrist_idx = available[0]
-            print(f"[camera] Only one camera found (index {available[0]}), using for both")
+            print(f"{C.YELLOW}[camera]{C.RESET} Only one camera found (index {available[0]}), using for both")
 
     cam_names = {"top": CAMERA_TOP_NAME, "wrist": CAMERA_WRIST_NAME}
     for name, idx in [("top", top_idx), ("wrist", wrist_idx)]:
@@ -225,9 +236,9 @@ def init_cameras():
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_HEIGHT)
             cameras[name] = cap
             camera_info[name] = {"name": cam_names[name], "index": idx}
-            print(f"[camera] {name} camera opened (index {idx})")
+            print(f"{C.GREEN}[camera]{C.RESET} {name} camera opened (index {idx})")
         else:
-            print(f"[camera] WARNING: Could not open {name} camera (index {idx})")
+            print(f"{C.RED}[camera]{C.RESET} Could not open {name} camera (index {idx})")
 
 def capture_snapshot(name):
     """Capture a frame, resize, return base64 JPEG string."""
@@ -242,7 +253,7 @@ def capture_snapshot(name):
     if not ret:
         # Try reopening the camera once
         idx = CAMERA_WRIST_IDX if name == "wrist" else CAMERA_TOP_IDX
-        print(f"[camera] {name} read failed, reopening index {idx}...")
+        print(f"{C.YELLOW}[camera]{C.RESET} {name} read failed, reopening index {idx}...")
         cam.release()
         cam = cv2.VideoCapture(idx)
         if cam.isOpened():
@@ -764,10 +775,10 @@ def find_leader_port():
         follower_port = robot.bus.port if robot and hasattr(robot, 'bus') else ROBOT_PORT
         for port in serial.tools.list_ports.comports():
             if port.device != follower_port and ("ttyACM" in port.device or "ttyUSB" in port.device):
-                print(f"[teleop] Auto-detected leader at {port.device} (serial: {port.serial_number})")
+                print(f"{C.GREEN}[teleop]{C.RESET} Auto-detected leader at {C.CYAN}{port.device}{C.RESET} (serial: {port.serial_number})")
                 return port.device
     except Exception as e:
-        print(f"[teleop] Auto-detect failed: {e}")
+        print(f"{C.RED}[teleop]{C.RESET} Auto-detect failed: {e}")
     return None
 
 def init_leader(port):
@@ -779,10 +790,10 @@ def init_leader(port):
         config = SOLeaderTeleopConfig(port=port)
         leader = SOLeader(config)
         leader.connect()
-        print(f"[teleop] Leader arm connected on {port}")
+        print(f"{C.GREEN}[teleop]{C.RESET} Leader arm connected on {C.CYAN}{port}{C.RESET}")
         return True
     except Exception as e:
-        print(f"[teleop] Failed to connect leader arm: {e}")
+        print(f"{C.RED}[teleop]{C.RESET} Failed to connect leader arm: {e}")
         leader = None
         return False
 
@@ -790,18 +801,18 @@ def teleop_loop():
     """Background thread: read leader positions and send to follower at TELEOP_FPS."""
     global teleop_active
     interval = 1.0 / TELEOP_FPS
-    print(f"[teleop] Loop started at {TELEOP_FPS} fps")
+    print(f"{C.GREEN}[teleop]{C.RESET} Loop started at {TELEOP_FPS} fps")
     while teleop_active:
         try:
             action = leader.get_action()
             with robot_lock:
                 robot.send_action(action)
         except Exception as e:
-            print(f"[teleop] Error: {e}")
+            print(f"{C.RED}[teleop]{C.RESET} Error: {e}")
             break
         time.sleep(interval)
     teleop_active = False
-    print("[teleop] Loop stopped")
+    print(f"{C.YELLOW}[teleop]{C.RESET} Loop stopped")
 
 def start_teleop(port=None):
     """Start teleoperation. Returns (ok, message)."""
@@ -913,6 +924,94 @@ def get_pending():
     return jsonify({"messages": msgs})
 
 
+# ---- Diagnostics ----
+
+def run_diagnostics():
+    """Run startup diagnostics and print colored pass/fail summary."""
+    print(f"\n{C.BOLD}{'=' * 54}{C.RESET}")
+    print(f"{C.BOLD}  SO-101 Robot Server — Startup Diagnostics{C.RESET}")
+    print(f"{C.BOLD}{'=' * 54}{C.RESET}\n")
+
+    errors = []
+
+    # 1. Robot arm
+    print(f"  {C.BLUE}[1/4]{C.RESET} Robot arm............", end=" ")
+    if robot is not None:
+        try:
+            with robot_lock:
+                obs = robot.get_observation()
+            joint_count = len([k for k in obs if "pos" in k or "joint" in k])
+            print(f"{C.GREEN}OK{C.RESET} ({joint_count} joints)")
+        except Exception as e:
+            print(f"{C.RED}FAIL{C.RESET}")
+            errors.append(f"Robot arm connected but cannot read joints: {e}")
+    else:
+        print(f"{C.RED}FAIL{C.RESET} — not connected")
+        errors.append("Robot arm not connected (camera-only mode)")
+
+    # 2. Torque
+    print(f"  {C.BLUE}[2/4]{C.RESET} Torque...............", end=" ")
+    if robot is not None:
+        try:
+            robot.bus.enable_torque()
+            print(f"{C.GREEN}OK{C.RESET} (enabled)")
+        except Exception as e:
+            print(f"{C.RED}FAIL{C.RESET}")
+            errors.append(f"Torque enable failed: {e}")
+    else:
+        print(f"{C.YELLOW}SKIP{C.RESET} (no arm)")
+
+    # 3. Top camera
+    print(f"  {C.BLUE}[3/4]{C.RESET} Top camera...........", end=" ")
+    if "top" in cameras:
+        import cv2
+        cam = cameras["top"]
+        for _ in range(4):
+            cam.grab()
+        ret, frame = cam.read()
+        if ret and frame is not None:
+            h, w = frame.shape[:2]
+            print(f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('top', {}).get('index', '?')})")
+        else:
+            print(f"{C.RED}FAIL{C.RESET} — opened but cannot read frames")
+            errors.append("Top camera opened but frame read failed")
+    else:
+        print(f"{C.RED}FAIL{C.RESET} — not available")
+        errors.append("Top camera not available")
+
+    # 4. Wrist camera
+    print(f"  {C.BLUE}[4/4]{C.RESET} Wrist camera.........", end=" ")
+    if "wrist" in cameras:
+        import cv2
+        cam = cameras["wrist"]
+        for _ in range(4):
+            cam.grab()
+        ret, frame = cam.read()
+        if ret and frame is not None:
+            h, w = frame.shape[:2]
+            print(f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('wrist', {}).get('index', '?')})")
+        else:
+            print(f"{C.RED}FAIL{C.RESET} — opened but cannot read frames")
+            errors.append("Wrist camera opened but frame read failed")
+    else:
+        print(f"{C.RED}FAIL{C.RESET} — not available")
+        errors.append("Wrist camera not available")
+
+    # Summary
+    print()
+    if not errors:
+        print(f"  {C.GREEN}{C.BOLD}All systems working{C.RESET}")
+    else:
+        print(f"  {C.RED}{C.BOLD}{len(errors)} error(s) detected:{C.RESET}")
+        for err in errors:
+            print(f"    {C.RED}*{C.RESET} {err}")
+
+    print(f"\n{C.BOLD}{'=' * 54}{C.RESET}")
+    print(f"  Server:    {C.CYAN}http://0.0.0.0:{PORT}{C.RESET}")
+    print(f"  Dashboard: {C.CYAN}http://localhost:{PORT}/stream{C.RESET}")
+    print(f"{C.BOLD}{'=' * 54}{C.RESET}\n")
+
+
 # ---- Main ----
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -924,12 +1023,9 @@ if __name__ == "__main__":
     if args.leader_port:
         LEADER_PORT = args.leader_port
 
-    print("[boot] Starting SO-101 Robot Agent Server...")
-    print(f"[boot] Robot port: {ROBOT_PORT}")
+    print(f"\n{C.BLUE}[boot]{C.RESET} Starting SO-101 Robot Agent Server...")
+    print(f"{C.DIM}[boot] Robot port: {ROBOT_PORT}{C.RESET}")
     init_robot()
     init_cameras()
-    print(f"[boot] Server running on http://0.0.0.0:{PORT}")
-    print(f"[boot] Cameras available: {list(cameras.keys())}")
-    print(f"[boot] Robot connected: {robot is not None}")
-    print(f"[boot] Live stream: http://localhost:{PORT}/stream")
+    run_diagnostics()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
