@@ -391,8 +391,23 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
 .chat-send:active{background:#2e7d32}
 .card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px}
 .card h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-.joint-row{display:flex;justify-content:space-between;font-size:13px;padding:2px 0;font-family:'SF Mono',monospace}
-.joint-name{color:#999}.joint-val{color:#4fc3f7}
+.joint-row{display:flex;align-items:center;gap:4px;font-size:13px;padding:3px 0;font-family:'SF Mono',monospace}
+.joint-name{color:#999;width:44px;flex-shrink:0}
+.joint-val{color:#4fc3f7;text-align:right;flex:1}
+.jog-btn{width:26px;height:24px;border:1px solid #444;border-radius:4px;background:#222;color:#aaa;
+         font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+         padding:0;transition:background .12s;flex-shrink:0;font-weight:bold}
+.jog-btn:hover{background:#333;color:#fff;border-color:#666}
+.jog-btn:active{background:#444}
+.joint-input{width:60px;padding:2px 4px;border:1px solid #444;border-radius:4px;background:#222;color:#4fc3f7;
+             font-size:12px;font-family:'SF Mono',monospace;text-align:right;outline:none;transition:border-color .15s}
+.joint-input:focus{border-color:#42a5f5}
+.joint-set-btn{padding:2px 8px;border:1px solid #388e3c;border-radius:4px;background:#222;color:#66bb6a;
+               font-size:11px;cursor:pointer;flex-shrink:0;transition:background .12s}
+.joint-set-btn:hover{background:#1b5e20}
+.jog-step-row{display:flex;align-items:center;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid #2a2a2a}
+.jog-step-row label{font-size:11px;color:#666;flex:1}
+.jog-step-row select{background:#222;border:1px solid #444;border-radius:4px;color:#eee;font-size:11px;padding:2px 4px}
 .torque-status{font-size:13px;margin-top:6px;padding:4px 8px;border-radius:4px;text-align:center;font-weight:600}
 .torque-on{background:#1b5e20;color:#66bb6a}
 .torque-off{background:#4e342e;color:#ff8a65}
@@ -467,8 +482,18 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
       </div>
     </div>
     <div class="card">
-      <h2>Joint Positions</h2>
+      <h2>Joint Control</h2>
       <div id="joints"></div>
+      <div class="jog-step-row">
+        <label>Jog step:</label>
+        <select id="jog-step" onchange="jogStep=parseFloat(this.value)">
+          <option value="1">1&deg;</option>
+          <option value="5" selected>5&deg;</option>
+          <option value="10">10&deg;</option>
+          <option value="20">20&deg;</option>
+        </select>
+        <button class="joint-set-btn" onclick="setAllJoints()" style="padding:3px 10px">Set All</button>
+      </div>
       <div id="torque-bar" class="torque-status torque-off">TORQUE OFF</div>
     </div>
     <div class="card">
@@ -509,6 +534,7 @@ const SHORT={shoulder_pan:'Pan',shoulder_lift:'Lift',elbow_flex:'Elbow',wrist_fl
 const PHASE_LABELS={idle:'Idle',calibrating:'Calibrating',homing:'Homing',prescan:'Scanning',aligning:'Aligning',
   waiting_confirm:'Waiting for Confirm',lowering:'Lowering',gripping:'Gripping',lifting:'Lifting',
   dropping:'Dropping',done:'Done'};
+let jogStep=5;
 function post(url,body){fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
 function torque(on){post('/enable',{enabled:on})}
 function grip(v){post('/move',{gripper:v})}
@@ -516,20 +542,61 @@ function preset(p){post('/move_preset',{pose:p})}
 function teleopCtl(a){post('/teleop',{action:a})}
 function confirmGrip(v){post('/confirm_grip',{confirm:v})}
 function skipAlign(){post('/confirm_grip',{confirm:'done'})}
+function jogJoint(joint,dir){
+  let inp=document.getElementById('inp-'+joint);
+  let cur=inp?parseFloat(inp.value):0;
+  let target=cur+dir*jogStep;
+  let cmd={};cmd[joint]=target;
+  post('/move',cmd);
+}
+function setJoint(joint){
+  let inp=document.getElementById('inp-'+joint);
+  if(!inp)return;
+  let v=parseFloat(inp.value);
+  if(isNaN(v))return;
+  let cmd={};cmd[joint]=v;
+  post('/move',cmd);
+}
+function setAllJoints(){
+  let cmd={};
+  for(let j of JOINT_ORDER){
+    let inp=document.getElementById('inp-'+j);
+    if(inp){let v=parseFloat(inp.value);if(!isNaN(v))cmd[j]=v;}
+  }
+  post('/move',cmd);
+}
 function poll(){
   fetch('/status').then(r=>r.json()).then(d=>{
     document.getElementById('dot').className='status-dot ok';
     document.getElementById('conn-text').textContent='Connected — arm '+(d.robot_connected?'online':'offline');
-    let h='';
     if(d.joints){
+      let container=document.getElementById('joints');
+      // Build rows only on first render
+      if(!container.dataset.init){
+        let h='';
+        for(let j of JOINT_ORDER){
+          h+='<div class="joint-row">';
+          h+='<button class="jog-btn" onclick="jogJoint(\''+j+'\',-1)">&minus;</button>';
+          h+='<span class="joint-name">'+SHORT[j]+'</span>';
+          h+='<input class="joint-input" id="inp-'+j+'" type="number" step="any" value="0" onkeydown="if(event.key===\'Enter\')setJoint(\''+j+'\')">';
+          h+='<button class="jog-btn" onclick="jogJoint(\''+j+'\',1)">+</button>';
+          h+='<button class="joint-set-btn" onclick="setJoint(\''+j+'\')">Set</button>';
+          h+='</div>';
+        }
+        container.innerHTML=h;
+        container.dataset.init='1';
+      }
+      // Update values only when input is not focused
       for(let j of JOINT_ORDER){
+        let inp=document.getElementById('inp-'+j);
+        if(!inp)continue;
         let k=Object.keys(d.joints).find(x=>x.replace('.pos','')==j);
-        let v=k?d.joints[k]:'-';
-        if(typeof v==='number')v=v.toFixed(1)+'\\u00b0';
-        h+='<div class="joint-row"><span class="joint-name">'+SHORT[j]+'</span><span class="joint-val">'+v+'</span></div>';
+        let v=k?d.joints[k]:0;
+        if(typeof v==='number'&&document.activeElement!==inp){
+          inp.value=v.toFixed(1);
+        }
       }
     }
-    document.getElementById('joints').innerHTML=h;
     let tb=document.getElementById('torque-bar');
     if(d.torque_enabled){tb.className='torque-status torque-on';tb.textContent='TORQUE ON'}
     else{tb.className='torque-status torque-off';tb.textContent='TORQUE OFF'}
