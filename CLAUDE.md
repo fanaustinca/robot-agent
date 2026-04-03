@@ -50,13 +50,13 @@ Dashboard (live cameras + controls): http://localhost:7878/stream
 - **Safety bounds**: shoulder_lift clamped to [-65, 50] degrees (agent space).
 - **Slow moves**: 8-step interpolation with 0.08s delays to avoid jerky motion.
 - **Image size**: Wrist 256x192, top 512x384. JPEG quality 60 — kept small for API cost.
-- **Pickup detection**: Simple keyword matching (no API call) — see `PICKUP_KEYWORDS` list. Excludes ambiguous words like "get", "take", "lift" to avoid false positives.
+- **Pickup detection**: Simple keyword matching (no API call) — see `PICKUP_KEYWORDS` list. Excludes ambiguous words like "get", "take", "lift" to avoid false positives. Object name extracted from `pick up "object"` or `pick up the object` format.
 - **Camera-only mode**: Server runs without the arm if serial connection fails.
 - **Startup health check**: Agent verifies server, arm, and cameras on boot with pass/fail summary.
 - **Colored terminal output**: ANSI colors via `C` class — green=success, red=error, yellow=warning, blue=in-progress, cyan=info.
 - **Joint aliases**: Short names (`sp`, `sl`, `ef`, `wf`, `wr`, `g` or `pan`, `lift`, `elbow`, `flex`, `roll`, `grip`) work in `/move`, `/pos`, `/torque-*` commands.
 
-## Pickup Sequence (7 steps)
+## Pickup Sequence (8 steps)
 
 1. **Prescan** — top camera sent to Gemini to estimate pan + forward/back degrees to target
 2. **Home** — move to home position (slow interpolation)
@@ -65,6 +65,10 @@ Dashboard (live cameras + controls): http://localhost:7878/stream
 5. **Apply prescan** — jump to estimated position
 6. **Fine alignment** — wrist camera feedback loop (10 iterations max, type `done` or press Done on dashboard to skip)
 7. **Confirm + grip** — auto-confirms after 10s, or confirm/cancel via dashboard
+8. **Grip verification** — wrist snapshot sent to Gemini to check if object is held:
+   - **Held** → proceed to drop position
+   - **Not held** → user gets 3s to reject retry (n → arm goes home). If no rejection, arm returns to pre-lift position, re-aligns (5 iterations), and retries grip once.
+   - **Inconclusive** → assumes held, proceeds to drop
 
 ## Floor Calibration
 

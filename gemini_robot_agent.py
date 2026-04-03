@@ -338,6 +338,76 @@ def is_pickup_prompt(client, text):
     lower = text.lower()
     return any(kw in lower for kw in PICKUP_KEYWORDS)
 
+def extract_object_name(text):
+    """Extract the object name from a pickup prompt.
+    Supports: pick up "red block", pick up the red block, grab red block, etc."""
+    # Try quoted object first: pick up "red block"
+    m = re.search(r'["\u201c](.+?)["\u201d]', text)
+    if m:
+        return m.group(1).strip()
+    # Strip the keyword prefix and return the rest
+    lower = text.lower()
+    for kw in PICKUP_KEYWORDS:
+        idx = lower.find(kw)
+        if idx >= 0:
+            rest = text[idx + len(kw):].strip()
+            # Remove leading "the", "a", "an"
+            rest = re.sub(r'^(the|a|an)\s+', '', rest, flags=re.IGNORECASE).strip()
+            if rest:
+                return rest
+    return text.strip()
+
+
+GRIP_CHECK_SYSTEM = """You are checking whether a robot gripper is holding an object.
+
+You will see a wrist camera image taken after the gripper closed and the arm lifted.
+
+The target object is: {object_name}
+
+Look at the gripper in the image. Is the target object currently being held between the gripper fingers?
+
+Respond with JSON only — no explanation:
+{{"holding": true}} or {{"holding": false}}"""
+
+
+def check_grip_success(client, object_name):
+    """Send wrist snapshot to Gemini to verify if the object is being held.
+    Returns True if holding, False if not, None on error."""
+    wrist_b64 = get_wrist_snapshot()
+    if not wrist_b64:
+        print(f"{C.YELLOW}[grip-check]{C.RESET} Could not get wrist snapshot")
+        return None
+
+    parts = [
+        types.Part.from_bytes(data=base64.b64decode(wrist_b64), mime_type="image/jpeg"),
+        types.Part.from_text(text=f"Is the gripper holding the {object_name}? Look carefully at the gripper fingers."),
+    ]
+
+    try:
+        response = client.models.generate_content(
+            model=ALIGNER_MODEL,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.GenerateContentConfig(
+                system_instruction=GRIP_CHECK_SYSTEM.format(object_name=object_name)
+            )
+        )
+    except Exception as e:
+        print(f"{C.RED}[grip-check]{C.RESET} API error: {e}")
+        return None
+
+    match = re.search(r'\{.*\}', response.text, re.DOTALL)
+    if not match:
+        print(f"{C.YELLOW}[grip-check]{C.RESET} Could not parse response: {response.text}")
+        return None
+
+    try:
+        result = json.loads(match.group())
+    except json.JSONDecodeError:
+        return None
+
+    holding = result.get("holding", False)
+    return holding
+
 
 def timed_confirm(prompt, timeout=5, default="y"):
     """Prompt user with auto-confirm after timeout seconds. Returns 'y' or 'n'."""
@@ -1103,7 +1173,10 @@ def run_agent():
             continue
 
         if is_pickup_prompt(client, user_input):
-            push_chat(f"Starting pickup sequence for: {user_input}", role="system")
+            object_name = extract_object_name(user_input)
+            push_chat(f"Starting pickup sequence for: {object_name}", role="system")
+            print(f"\n{C.BOLD}Target object: {C.CYAN}{object_name}{C.RESET}\n")
+
             # Auto-calibrate on first pickup if not yet done
             if _floor_drop is None:
                 print(f"{C.YELLOW}[calib]{C.RESET} Not calibrated yet — running auto-calibration...")
@@ -1114,11 +1187,11 @@ def run_agent():
             drop = _floor_drop if _floor_drop is not None else 20.0
 
             # Step 1: Prescan — use top camera to estimate target position BEFORE moving
-            prescan_result = prescan_target(client, user_input)
+            prescan_result = prescan_target(client, object_name)
 
             # Step 2: Move to home (smooth interpolation)
             push_state("homing", "Moving to home position...")
-            print(f"\n{C.BLUE}[2/7]{C.RESET} Moving to home position...")
+            print(f"\n{C.BLUE}[2/8]{C.RESET} Moving to home position...")
             hw_joints = hardware_to_agent(get_joints())
             if hw_joints:
                 _commanded.update(hw_joints)
@@ -1129,13 +1202,13 @@ def run_agent():
 
             # Step 3: Open gripper
             push_state("homing", "Opening gripper...")
-            print(f"{C.BLUE}[3/7]{C.RESET} Opening gripper...")
+            print(f"{C.BLUE}[3/8]{C.RESET} Opening gripper...")
             move_joints({"gripper": 100})
             print(f"      {C.GREEN}Done.{C.RESET}")
 
             # Step 4: Lower arm for easier alignment (slow)
             push_state("homing", f"Lowering arm to {SETUP_SHOULDER_LIFT}°...")
-            print(f"{C.BLUE}[4/7]{C.RESET} Lowering arm (shoulder_lift: {SETUP_SHOULDER_LIFT}°)...")
+            print(f"{C.BLUE}[4/8]{C.RESET} Lowering arm (shoulder_lift: {SETUP_SHOULDER_LIFT}°)...")
             move_joints_slow({"shoulder_lift": SETUP_SHOULDER_LIFT})
             print(f"      {C.GREEN}Done.{C.RESET}")
 
@@ -1143,21 +1216,49 @@ def run_agent():
             if prescan_result:
                 pan, fwd = prescan_result
                 push_state("homing", f"Jumping to prescan estimate (pan={pan:.0f}°, fwd={fwd:.0f}°)")
-                print(f"{C.BLUE}[5/7]{C.RESET} Applying prescan estimate...")
+                print(f"{C.BLUE}[5/8]{C.RESET} Applying prescan estimate...")
                 apply_prescan(pan, fwd)
                 time.sleep(0.3)
                 print(f"      {C.GREEN}Done.{C.RESET}")
             else:
-                print(f"{C.DIM}[5/7] Prescan skipped{C.RESET}")
+                print(f"{C.DIM}[5/8] Prescan skipped{C.RESET}")
 
             # Step 6: Fine visual alignment
-            print(f"{C.BLUE}[6/7]{C.RESET} Starting visual alignment...")
-            visual_align(client, user_input)
+            print(f"{C.BLUE}[6/8]{C.RESET} Starting visual alignment...")
+            visual_align(client, object_name)
 
             # Step 7: Confirm and close gripper
-            print(f"\n{C.BOLD}[7/7] Ready to grip.{C.RESET} {C.DIM}(drop={drop:.1f}°){C.RESET}")
+            print(f"\n{C.BOLD}[7/8] Ready to grip.{C.RESET} {C.DIM}(drop={drop:.1f}°){C.RESET}")
             confirm = wait_for_confirm("      Close gripper? (y/n):", timeout=10, default="y")
-            if confirm in ("y", "yes", ""):
+            if confirm not in ("y", "yes", ""):
+                push_state("idle", "Pickup cancelled")
+                print(f"      {C.YELLOW}Skipped.{C.RESET}")
+                push_chat("Pickup cancelled.", role="agent")
+                time.sleep(2)
+                push_state("idle")
+                print()
+                continue
+
+            # -- Grip attempt loop (retry up to MAX_GRIP_RETRIES times) --
+            MAX_GRIP_RETRIES = 1
+            grip_succeeded = False
+
+            for grip_attempt in range(1 + MAX_GRIP_RETRIES):
+                attempt_label = f"attempt {grip_attempt + 1}/{1 + MAX_GRIP_RETRIES}" if MAX_GRIP_RETRIES > 0 else ""
+                if grip_attempt > 0:
+                    print(f"\n{C.CYAN}[retry]{C.RESET} Retrying grip ({attempt_label})...")
+                    push_chat(f"Object not held — retrying grip ({attempt_label})", role="system")
+
+                    # Re-align for 5 more iterations
+                    push_state("aligning", f"Re-aligning for retry...")
+                    print(f"{C.BLUE}[retry]{C.RESET} Re-aligning (5 iterations)...")
+                    global MAX_ALIGN_ITERATIONS
+                    saved_max = MAX_ALIGN_ITERATIONS
+                    MAX_ALIGN_ITERATIONS = 5
+                    visual_align(client, object_name)
+                    MAX_ALIGN_ITERATIONS = saved_max
+
+                # Lower to object
                 push_state("lowering", f"Lowering {drop:.1f}° to object...")
                 print(f"      {C.BLUE}Lowering to object ({drop:.1f}°)...{C.RESET}")
                 start_sl = _commanded.get("shoulder_lift", 0)
@@ -1171,12 +1272,16 @@ def run_agent():
                     except Exception:
                         pass
                     time.sleep(SLOW_MOVE_DELAY)
-                print(f"      {C.DIM}Waiting before lift-off...{C.RESET}")
+
+                # Brief pause before grip
+                print(f"      {C.DIM}Waiting before grip...{C.RESET}")
                 time.sleep(1.0)
                 try:
                     requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": True}, timeout=5)
                 except Exception:
                     pass
+
+                # Raise slightly off floor
                 print(f"      {C.BLUE}Raising {CALIB_LIFT_OFFSET}° off floor...{C.RESET}")
                 lift_sl = target_sl + CALIB_LIFT_OFFSET
                 try:
@@ -1184,6 +1289,8 @@ def run_agent():
                 except Exception:
                     pass
                 time.sleep(0.5)
+
+                # Close gripper slowly
                 push_state("gripping", "Closing gripper...")
                 print(f"      {C.BLUE}Closing gripper (slow)...{C.RESET}")
                 grip_steps = SLOW_MOVE_STEPS * 2
@@ -1199,11 +1306,83 @@ def run_agent():
                             time.sleep(0.1)
                     time.sleep(grip_delay)
                 _commanded["gripper"] = 0
-                print(f"      {C.DIM}Gripper closed. Waiting...{C.RESET}")
-                time.sleep(1.5)
-                push_state("lifting", "Lifting arm...")
+                print(f"      {C.DIM}Gripper closed.{C.RESET}")
+                time.sleep(1.0)
+
+                # Lift arm
+                push_state("lifting", "Lifting arm to check grip...")
                 print(f"      {C.BLUE}Lifting arm...{C.RESET}")
+                pre_lift_pos = dict(_commanded)
                 move_joints_slow({"shoulder_lift": _commanded.get("shoulder_lift", 0) + 30})
+                time.sleep(0.5)
+
+                # Step 8: Grip verification — send wrist snapshot to Gemini
+                push_state("lifting", f"Checking if {object_name} is held...")
+                print(f"\n{C.BLUE}[8/8]{C.RESET} Verifying grip on {C.BOLD}{object_name}{C.RESET}...")
+                holding = check_grip_success(client, object_name)
+
+                if holding is True:
+                    print(f"      {C.GREEN}{C.BOLD}Object held!{C.RESET}")
+                    push_chat(f"Grip verified — holding {object_name}!", role="agent")
+                    grip_succeeded = True
+                    break
+                elif holding is False:
+                    print(f"      {C.RED}Object NOT held.{C.RESET}")
+                    push_chat(f"Grip check: {object_name} not held.", role="agent")
+                else:
+                    print(f"      {C.YELLOW}Grip check inconclusive — assuming held.{C.RESET}")
+                    push_chat("Grip check inconclusive — proceeding.", role="agent")
+                    grip_succeeded = True
+                    break
+
+                # Object not held — check if we can retry
+                if grip_attempt < MAX_GRIP_RETRIES:
+                    # Give user 3 seconds to reject retry (→ go home instead)
+                    print(f"\n{C.YELLOW}[retry]{C.RESET} Will retry in 3s. Press {C.BOLD}n{C.RESET} or {C.BOLD}Cancel{C.RESET} on dashboard to abort → home")
+                    abort = wait_for_confirm("      Retry? (y/n):", timeout=3, default="y")
+                    if abort in ("n", "no", "cancel"):
+                        print(f"      {C.YELLOW}Aborted — returning home.{C.RESET}")
+                        push_chat("Retry rejected — returning home.", role="agent")
+                        # Open gripper and go home
+                        move_joints({"gripper": 100})
+                        _commanded["gripper"] = 100
+                        time.sleep(0.3)
+                        hw_joints = hardware_to_agent(get_joints())
+                        if hw_joints:
+                            _commanded.update(hw_joints)
+                        move_joints_slow(HOME_POSITION)
+                        _commanded.update(HOME_POSITION)
+                        push_state("idle", "Pickup aborted")
+                        time.sleep(2)
+                        push_state("idle")
+                        print()
+                        break
+
+                    # Return to pre-lift position, open gripper, and retry alignment
+                    print(f"      {C.BLUE}Returning to last position...{C.RESET}")
+                    move_joints({"gripper": 100})
+                    _commanded["gripper"] = 100
+                    time.sleep(0.3)
+                    move_joints_slow({"shoulder_lift": pre_lift_pos.get("shoulder_lift", SETUP_SHOULDER_LIFT)})
+                else:
+                    # No more retries
+                    print(f"      {C.RED}Max retries reached. Returning home.{C.RESET}")
+                    push_chat(f"Failed to pick up {object_name} after retries. Returning home.", role="agent")
+                    move_joints({"gripper": 100})
+                    _commanded["gripper"] = 100
+                    time.sleep(0.3)
+                    hw_joints = hardware_to_agent(get_joints())
+                    if hw_joints:
+                        _commanded.update(hw_joints)
+                    move_joints_slow(HOME_POSITION)
+                    _commanded.update(HOME_POSITION)
+                    push_state("idle", "Pickup failed")
+                    time.sleep(2)
+                    push_state("idle")
+                    print()
+
+            # If grip succeeded, proceed to drop
+            if grip_succeeded:
                 push_state("dropping", "Moving to drop position...")
                 print(f"      {C.BLUE}Moving to drop position...{C.RESET}")
                 move_joints_slow(DROP_POSITION)
@@ -1213,15 +1392,11 @@ def run_agent():
                 _commanded["gripper"] = 100
                 push_state("done", "Pickup complete!")
                 print(f"      {C.GREEN}{C.BOLD}Dropped!{C.RESET}")
-                push_chat("Pickup complete! Object dropped.", role="agent")
-            else:
-                push_state("idle", "Pickup cancelled")
-                print(f"      {C.YELLOW}Skipped.{C.RESET}")
-                push_chat("Pickup cancelled.", role="agent")
-            # Reset to idle after a moment
-            time.sleep(2)
-            push_state("idle")
-            print()  # blank line after pickup
+                push_chat(f"Pickup complete! {object_name} dropped.", role="agent")
+                # Reset to idle after a moment
+                time.sleep(2)
+                push_state("idle")
+                print()  # blank line after pickup
         else:
             run_free_agent(client, user_input)
 
