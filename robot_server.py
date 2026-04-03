@@ -402,23 +402,17 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
 .chat-send:active{background:#2e7d32}
 .card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px}
 .card h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-.joint-row{display:flex;align-items:center;gap:4px;font-size:13px;padding:3px 0;font-family:'SF Mono',monospace}
-.joint-name{color:#999;width:44px;flex-shrink:0}
-.joint-val{color:#4fc3f7;text-align:right;flex:1}
-.jog-btn{width:26px;height:24px;border:1px solid #444;border-radius:4px;background:#222;color:#aaa;
-         font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;
-         padding:0;transition:background .12s;flex-shrink:0;font-weight:bold}
-.jog-btn:hover{background:#333;color:#fff;border-color:#666}
-.jog-btn:active{background:#444}
-.joint-input{width:60px;padding:2px 4px;border:1px solid #444;border-radius:4px;background:#222;color:#4fc3f7;
+.joint-row{display:flex;align-items:center;gap:6px;font-size:13px;padding:5px 0;border-bottom:1px solid #222;font-family:'SF Mono',monospace}
+.joint-row:last-child{border-bottom:none}
+.joint-name{color:#999;width:44px;flex-shrink:0;font-weight:500}
+.joint-deg{color:#4fc3f7;width:52px;text-align:right;flex-shrink:0;font-size:12px}
+.joint-slider{flex:1;-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;background:#333;outline:none;cursor:pointer;min-width:60px}
+.joint-slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#4fc3f7;cursor:pointer;border:2px solid #222}
+.joint-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#4fc3f7;cursor:pointer;border:2px solid #222}
+.joint-slider:hover::-webkit-slider-thumb{background:#81d4fa;box-shadow:0 0 6px rgba(79,195,247,0.4)}
+.joint-input{width:54px;padding:3px 4px;border:1px solid #444;border-radius:4px;background:#222;color:#4fc3f7;
              font-size:12px;font-family:'SF Mono',monospace;text-align:right;outline:none;transition:border-color .15s}
 .joint-input:focus{border-color:#42a5f5}
-.joint-set-btn{padding:2px 8px;border:1px solid #388e3c;border-radius:4px;background:#222;color:#66bb6a;
-               font-size:11px;cursor:pointer;flex-shrink:0;transition:background .12s}
-.joint-set-btn:hover{background:#1b5e20}
-.jog-step-row{display:flex;align-items:center;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid #2a2a2a}
-.jog-step-row label{font-size:11px;color:#666;flex:1}
-.jog-step-row select{background:#222;border:1px solid #444;border-radius:4px;color:#eee;font-size:11px;padding:2px 4px}
 .torque-status{font-size:13px;margin-top:6px;padding:4px 8px;border-radius:4px;text-align:center;font-weight:600}
 .torque-on{background:#1b5e20;color:#66bb6a}
 .torque-off{background:#4e342e;color:#ff8a65}
@@ -495,16 +489,6 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
     <div class="card">
       <h2>Joint Control</h2>
       <div id="joints"></div>
-      <div class="jog-step-row">
-        <label>Jog step:</label>
-        <select id="jog-step" onchange="jogStep=parseFloat(this.value)">
-          <option value="1">1&deg;</option>
-          <option value="5" selected>5&deg;</option>
-          <option value="10">10&deg;</option>
-          <option value="20">20&deg;</option>
-        </select>
-        <button class="joint-set-btn" onclick="setAllJoints()" style="padding:3px 10px">Set All</button>
-      </div>
       <div id="torque-bar" class="torque-status torque-off">TORQUE OFF</div>
     </div>
     <div class="card">
@@ -545,7 +529,8 @@ const SHORT={shoulder_pan:'Pan',shoulder_lift:'Lift',elbow_flex:'Elbow',wrist_fl
 const PHASE_LABELS={idle:'Idle',calibrating:'Calibrating',homing:'Homing',prescan:'Scanning',aligning:'Aligning',
   waiting_confirm:'Waiting for Confirm',lowering:'Lowering',gripping:'Gripping',lifting:'Lifting',
   dropping:'Dropping',done:'Done'};
-let jogStep=5;
+const JOINT_RANGES={shoulder_pan:[-150,150],shoulder_lift:[-110,110],elbow_flex:[-110,110],
+  wrist_flex:[-110,110],wrist_roll:[-150,150],gripper:[0,100]};
 function post(url,body){fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
 function torque(on){post('/enable',{enabled:on})}
 function grip(v){post('/move',{gripper:v})}
@@ -553,27 +538,27 @@ function preset(p){post('/move_preset',{pose:p})}
 function teleopCtl(a){post('/teleop',{action:a})}
 function confirmGrip(v){post('/confirm_grip',{confirm:v})}
 function skipAlign(){post('/confirm_grip',{confirm:'done'})}
-function jogJoint(joint,dir){
+function onSlider(joint){
+  let slider=document.getElementById('sld-'+joint);
   let inp=document.getElementById('inp-'+joint);
-  let cur=inp?parseFloat(inp.value):0;
-  let target=cur+dir*jogStep;
-  let cmd={};cmd[joint]=target;
-  post('/move',cmd);
-}
-function setJoint(joint){
-  let inp=document.getElementById('inp-'+joint);
-  if(!inp)return;
-  let v=parseFloat(inp.value);
-  if(isNaN(v))return;
+  let deg=document.getElementById('deg-'+joint);
+  if(!slider)return;
+  let v=parseFloat(slider.value);
+  if(inp)inp.value=v.toFixed(1);
+  if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
   let cmd={};cmd[joint]=v;
   post('/move',cmd);
 }
-function setAllJoints(){
-  let cmd={};
-  for(let j of JOINT_ORDER){
-    let inp=document.getElementById('inp-'+j);
-    if(inp){let v=parseFloat(inp.value);if(!isNaN(v))cmd[j]=v;}
-  }
+function onInput(joint){
+  let inp=document.getElementById('inp-'+joint);
+  let slider=document.getElementById('sld-'+joint);
+  let deg=document.getElementById('deg-'+joint);
+  if(!inp)return;
+  let v=parseFloat(inp.value);
+  if(isNaN(v))return;
+  if(slider)slider.value=v;
+  if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
+  let cmd={};cmd[joint]=v;
   post('/move',cmd);
 }
 function poll(){
@@ -586,26 +571,28 @@ function poll(){
       if(!container.dataset.init){
         let h='';
         for(let j of JOINT_ORDER){
+          let r=JOINT_RANGES[j]||[-150,150];
           h+='<div class="joint-row">';
-          h+='<button class="jog-btn" onclick="jogJoint(\''+j+'\',-1)">&minus;</button>';
           h+='<span class="joint-name">'+SHORT[j]+'</span>';
-          h+='<input class="joint-input" id="inp-'+j+'" type="number" step="any" value="0" onkeydown="if(event.key===\'Enter\')setJoint(\''+j+'\')">';
-          h+='<button class="jog-btn" onclick="jogJoint(\''+j+'\',1)">+</button>';
-          h+='<button class="joint-set-btn" onclick="setJoint(\''+j+'\')">Set</button>';
+          h+='<span class="joint-deg" id="deg-'+j+'">0.0\u00b0</span>';
+          h+='<input class="joint-slider" id="sld-'+j+'" type="range" min="'+r[0]+'" max="'+r[1]+'" step="0.5" value="0" oninput="onSlider(\''+j+'\')">';
+          h+='<input class="joint-input" id="inp-'+j+'" type="number" step="any" value="0" onkeydown="if(event.key===\'Enter\')onInput(\''+j+'\')" onchange="onInput(\''+j+'\')">';
           h+='</div>';
         }
         container.innerHTML=h;
         container.dataset.init='1';
       }
-      // Update values only when input is not focused
+      // Update values only when neither input nor slider is being interacted with
       for(let j of JOINT_ORDER){
         let inp=document.getElementById('inp-'+j);
-        if(!inp)continue;
+        let sld=document.getElementById('sld-'+j);
+        let deg=document.getElementById('deg-'+j);
         let k=Object.keys(d.joints).find(x=>x.replace('.pos','')==j);
         let v=k?d.joints[k]:0;
-        if(typeof v==='number'&&document.activeElement!==inp){
-          inp.value=v.toFixed(1);
-        }
+        if(typeof v!=='number')continue;
+        if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
+        if(sld&&document.activeElement!==sld)sld.value=v;
+        if(inp&&document.activeElement!==inp)inp.value=v.toFixed(1);
       }
     }
     let tb=document.getElementById('torque-bar');
