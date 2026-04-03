@@ -67,6 +67,7 @@ robot = None
 leader = None
 cameras = {}
 camera_info = {}  # {"top": {"name": ..., "index": ...}, "wrist": {...}}
+camera_locks = {"top": threading.Lock(), "wrist": threading.Lock()}
 robot_lock = threading.Lock()
 torque_enabled = False
 teleop_active = False
@@ -240,27 +241,47 @@ def init_cameras():
         else:
             print(f"{C.RED}[camera]{C.RESET} Could not open {name} camera (index {idx})")
 
+def reopen_camera(name):
+    """Try to reopen a camera by name. Returns True on success."""
+    import cv2
+    idx = camera_info.get(name, {}).get("index")
+    if idx is None:
+        idx = CAMERA_WRIST_IDX if name == "wrist" else CAMERA_TOP_IDX
+    print(f"{C.YELLOW}[camera]{C.RESET} {name} reopening index {idx}...")
+    old = cameras.get(name)
+    if old:
+        try:
+            old.release()
+        except Exception:
+            pass
+    cap = cv2.VideoCapture(idx)
+    if cap.isOpened():
+        cameras[name] = cap
+        print(f"{C.GREEN}[camera]{C.RESET} {name} reopened successfully")
+        return True
+    print(f"{C.RED}[camera]{C.RESET} {name} reopen failed")
+    cameras.pop(name, None)
+    return False
+
 def capture_snapshot(name):
     """Capture a frame, resize, return base64 JPEG string."""
     import cv2
-    cam = cameras.get(name)
-    if cam is None:
-        return None, f"Camera '{name}' not available"
-    # Flush stale buffer frames before capturing
-    for _ in range(4):
+    lock = camera_locks.get(name)
+    if lock is None:
+        return None, f"Unknown camera '{name}'"
+    with lock:
+        cam = cameras.get(name)
+        if cam is None:
+            return None, f"Camera '{name}' not available"
+        # Flush 1 stale buffer frame (reduced from 4 to cut latency)
         cam.grab()
-    ret, frame = cam.read()
-    if not ret:
-        # Try reopening the camera once
-        idx = CAMERA_WRIST_IDX if name == "wrist" else CAMERA_TOP_IDX
-        print(f"{C.YELLOW}[camera]{C.RESET} {name} read failed, reopening index {idx}...")
-        cam.release()
-        cam = cv2.VideoCapture(idx)
-        if cam.isOpened():
-            cameras[name] = cam
-            ret, frame = cam.read()
+        ret, frame = cam.read()
         if not ret:
-            return None, f"Failed to read from {name} camera"
+            if reopen_camera(name):
+                cam = cameras.get(name)
+                ret, frame = cam.read() if cam else (False, None)
+            if not ret:
+                return None, f"Failed to read from {name} camera"
     w = SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH
     h = SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT
     frame = cv2.resize(frame, (w, h))
@@ -307,16 +328,26 @@ def status():
 
 def mjpeg_generator(name):
     import cv2
+    fail_count = 0
     while True:
-        cam = cameras.get(name)
-        if cam is None:
+        lock = camera_locks.get(name)
+        if lock is None:
             break
-        for _ in range(4):
-            cam.grab()
-        ret, frame = cam.read()
+        with lock:
+            cam = cameras.get(name)
+            if cam is None:
+                break
+            ret, frame = cam.read()
         if not ret:
-            time.sleep(0.1)
+            fail_count += 1
+            if fail_count >= 5:
+                print(f"{C.YELLOW}[stream]{C.RESET} {name}: {fail_count} consecutive failures, reopening...")
+                with lock:
+                    reopen_camera(name)
+                fail_count = 0
+            time.sleep(0.2)
             continue
+        fail_count = 0
         sw = SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH
         sh = SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT
         frame = cv2.resize(frame, (sw, sh))
@@ -354,7 +385,7 @@ def mjpeg_generator(name):
             cv2.putText(frame, "10", (ruler_cx + ruler_half - 4, ruler_y - 10), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
-        time.sleep(0.016)  # ~60 fps
+        time.sleep(0.05)  # ~20 fps target (cameras deliver ~12-15fps max)
 
 @app.route("/stream/<name>")
 def stream(name):
