@@ -1330,10 +1330,18 @@ def run_agent():
                     print(f"      {C.RED}Object NOT held.{C.RESET}")
                     push_chat(f"Grip check: {object_name} not held.", role="agent")
                 else:
-                    print(f"      {C.YELLOW}Grip check inconclusive — assuming held.{C.RESET}")
-                    push_chat("Grip check inconclusive — proceeding.", role="agent")
-                    grip_succeeded = True
-                    break
+                    print(f"      {C.RED}{C.BOLD}Grip check inconclusive!{C.RESET} Vision could not determine if object is held.")
+                    print(f"      {C.YELLOW}Please check manually — is the {C.BOLD}{object_name}{C.RESET}{C.YELLOW} in the gripper?{C.RESET}")
+                    push_chat(f"ERROR: Grip check inconclusive for \"{object_name}\". Please check manually — is the object held? (y/n)", role="system")
+                    manual = wait_for_confirm(f"      Object held? (y/n):", timeout=15, default="n")
+                    if manual in ("y", "yes"):
+                        print(f"      {C.GREEN}User confirmed — object held.{C.RESET}")
+                        push_chat("User confirmed object is held.", role="agent")
+                        grip_succeeded = True
+                        break
+                    else:
+                        print(f"      {C.YELLOW}User says not held.{C.RESET}")
+                        push_chat("User says object not held.", role="agent")
 
                 # Object not held — check if we can retry
                 if grip_attempt < MAX_GRIP_RETRIES:
