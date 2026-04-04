@@ -261,9 +261,13 @@ def get_joints_agent():
 
 
 def move_joints_slow(target_joints):
-    """Interpolate from commanded positions to target over SLOW_MOVE_STEPS steps.
+    """Interpolate from actual hardware positions to target over SLOW_MOVE_STEPS steps.
     target_joints must be in agent space."""
-    start = dict(_commanded)  # snapshot of where arm currently is
+    # Read actual position so interpolation starts from where the arm really is
+    actual = get_joints_agent()
+    if actual:
+        _commanded.update(actual)
+    start = dict(_commanded)
 
     for step in range(1, SLOW_MOVE_STEPS + 1):
         t = step / SLOW_MOVE_STEPS
@@ -736,6 +740,11 @@ def prescan_target(client, target_description):
 
 def apply_prescan(pan_degrees, forward_degrees):
     """Move the arm based on prescan estimates using the same direction logic as alignment."""
+    # Read actual position so human adjustments are respected
+    actual = get_joints_agent()
+    if actual:
+        _commanded.update(actual)
+
     moves = {}
 
     if abs(pan_degrees) > 1:
@@ -833,6 +842,11 @@ def visual_align(client, target_description):
         max_delta = 15 if i < 3 else (5 if i >= MAX_ALIGN_ITERATIONS - 2 else 10)
         degrees = result.get("degrees", 5)
         degrees = min(max_delta, float(degrees))
+
+        # Read actual hardware position so human adjustments are respected
+        actual = get_joints_agent()
+        if actual:
+            _commanded.update(actual)
 
         def cur(joint):
             return _commanded.get(joint, 0)
