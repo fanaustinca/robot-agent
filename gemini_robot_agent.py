@@ -763,6 +763,11 @@ def visual_align(client, target_description):
     print(f"{C.DIM}[align] Max {MAX_ALIGN_ITERATIONS} iterations — type 'done' or press Done on dashboard to skip{C.RESET}\n")
 
     for i in range(MAX_ALIGN_ITERATIONS):
+        # Sync _commanded from hardware so dashboard jog/presets are reflected
+        hw = get_joints_agent()
+        if hw:
+            _commanded.update(hw)
+
         # Check for skip: terminal input or dashboard "done" button
         if select.select([sys.stdin], [], [], 0)[0]:
             line = sys.stdin.readline().strip().lower()
