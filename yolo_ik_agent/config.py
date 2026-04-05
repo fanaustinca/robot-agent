@@ -20,8 +20,8 @@ GRIPPER_CLEARANCE = 0.015   # gripper height above table for pickup (1.5 cm)
 GRIPPER_APPROACH_HEIGHT = 0.08  # approach height before lowering (8 cm)
 
 # ---- YOLO ----
-YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8m.pt")  # medium model
-YOLO_CONFIDENCE = 0.4       # minimum detection confidence
+YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8x-worldv2.pt")  # open-vocabulary model (extra-large)
+YOLO_CONFIDENCE = 0.15      # lower threshold for open-vocab detection
 YOLO_DEVICE = "cuda"        # "cuda" for GPU, "cpu" for CPU
 
 # ---- Camera Resolution (full res for local YOLO) ----
@@ -40,13 +40,15 @@ CHECKERBOARD_INNER_CORNERS = (7, 7)  # 8x8 squares = 7x7 inner corners
 CHECKERBOARD_SQUARE_SIZE = 0.032     # 3.2 cm per square (measured from chess board)
 
 # ---- Top Camera Extrinsic (position relative to arm base) ----
-# Measure these from your setup — distance from arm base to directly below camera
-# x = forward from arm base, y = left (positive) / right (negative), z = up
-TOP_CAM_X = 0.0             # camera roughly centered forward/back (adjust if offset)
-TOP_CAM_Y = -0.21           # camera is 21 cm to the LEFT of the arm base
+# Physical world frame: +X = right, +Y = forward, +Z = up (relative to arm base on table)
+TOP_CAM_X = -0.21           # camera is 21 cm to the LEFT of the arm base
+TOP_CAM_Y = 0.0             # camera roughly even forward/back with arm base
 TOP_CAM_Z = 0.55            # camera lens 55 cm above table
-# Camera looks straight down (adjust if angled)
-TOP_CAM_PITCH = -90.0       # degrees, -90 = looking straight down
+TOP_CAM_PITCH = -45.0       # degrees below horizontal (-90 = straight down, -45 = angled)
+
+# ---- URDF Base Offset ----
+# The URDF origin is offset from the physical arm base (from baseframe joint in URDF)
+URDF_BASE_OFFSET = (-0.163038, -0.168068, 0.0324817)
 
 # ---- Terminal Colors ----
 class C:

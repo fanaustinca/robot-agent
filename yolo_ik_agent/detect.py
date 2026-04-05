@@ -1,87 +1,97 @@
 """
-YOLO object detection wrapper.
-Detects objects in camera frames and returns 2D pixel coordinates.
+GroundingDINO object detection wrapper.
+Detects objects in camera frames using open-vocabulary text prompts.
 """
+
+import warnings
+warnings.filterwarnings("ignore", message=".*labels.*integer ids.*")
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
-from config import YOLO_MODEL, YOLO_CONFIDENCE, YOLO_DEVICE, C
+import torch
+from PIL import Image
+from config import YOLO_CONFIDENCE, YOLO_DEVICE, C
 
 
 _model = None
+_processor = None
 
 def get_model():
-    """Load YOLO model (cached)."""
-    global _model
+    """Load GroundingDINO model (cached)."""
+    global _model, _processor
     if _model is None:
-        print(f"{C.BLUE}[yolo]{C.RESET} Loading model: {YOLO_MODEL}...")
-        _model = YOLO(YOLO_MODEL)
-        # Warm up on GPU
-        _model.predict(np.zeros((640, 640, 3), dtype=np.uint8), device=YOLO_DEVICE, verbose=False)
-        print(f"{C.GREEN}[yolo]{C.RESET} Model loaded on {YOLO_DEVICE}")
-    return _model
+        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+        model_id = "IDEA-Research/grounding-dino-tiny"
+        print(f"{C.BLUE}[detect]{C.RESET} Loading GroundingDINO ({model_id})...")
+        _processor = AutoProcessor.from_pretrained(model_id)
+        _model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
+        if YOLO_DEVICE == "cuda" and torch.cuda.is_available():
+            _model = _model.to("cuda")
+            print(f"{C.GREEN}[detect]{C.RESET} GroundingDINO loaded on CUDA")
+        else:
+            print(f"{C.GREEN}[detect]{C.RESET} GroundingDINO loaded on CPU")
+    return _model, _processor
 
 
 def detect_objects(frame, target_label=None):
-    """Run YOLO detection on a frame.
+    """Run GroundingDINO detection on a frame.
 
     Args:
         frame: BGR numpy array (from OpenCV)
-        target_label: optional string to filter by class name (e.g., "brick", "cup")
+        target_label: text description of what to detect (e.g., "red block", "brick")
 
     Returns: list of detections, each a dict:
         {"label": str, "confidence": float, "bbox": (x1,y1,x2,y2), "center": (cx,cy)}
         Sorted by confidence (highest first).
     """
-    model = get_model()
-    results = model.predict(frame, device=YOLO_DEVICE, conf=YOLO_CONFIDENCE, verbose=False)
+    model, processor = get_model()
+    device = next(model.parameters()).device
+
+    # Convert BGR to RGB PIL image
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(rgb)
+
+    # Build text prompt — GroundingDINO uses "." separated phrases
+    if target_label:
+        text = target_label.strip().rstrip(".") + "."
+    else:
+        text = "object. block. cube. ball. cup. bottle. box."
+
+    inputs = processor(images=pil_image, text=text, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    results = processor.post_process_grounded_object_detection(
+        outputs,
+        input_ids=inputs.input_ids,
+        threshold=YOLO_CONFIDENCE,
+        text_threshold=YOLO_CONFIDENCE,
+        target_sizes=[pil_image.size[::-1]],  # (height, width)
+    )[0]
 
     detections = []
-    for r in results:
-        for box in r.boxes:
-            cls_id = int(box.cls[0])
-            label = model.names[cls_id]
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
+    for box, score, label in zip(results["boxes"], results["scores"], results["labels"]):
+        x1, y1, x2, y2 = box.tolist()
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        detections.append({
+            "label": label,
+            "confidence": float(score),
+            "bbox": (x1, y1, x2, y2),
+            "center": (cx, cy),
+        })
 
-            detections.append({
-                "label": label,
-                "confidence": conf,
-                "bbox": (x1, y1, x2, y2),
-                "center": (cx, cy),
-            })
-
-    # Sort by confidence
     detections.sort(key=lambda d: d["confidence"], reverse=True)
-
-    # Filter by target label if specified
-    if target_label:
-        target_lower = target_label.lower()
-        filtered = [d for d in detections if target_lower in d["label"].lower()]
-        if filtered:
-            return filtered
-        # If no exact match, return all (user might describe it differently)
-
     return detections
 
 
 def find_object_pixel(frame, target_label=None):
-    """Detect the most likely target object and return its center pixel coordinate.
-
-    Args:
-        frame: BGR numpy array
-        target_label: optional string to filter detections
-
-    Returns: (cx, cy) pixel coordinates or None if nothing detected.
-    """
+    """Detect the most likely target object and return its center pixel coordinate."""
     detections = detect_objects(frame, target_label)
     if not detections:
         return None
-    best = detections[0]
-    return best["center"]
+    return detections[0]["center"]
 
 
 def annotate_frame(frame, detections, target_idx=0):
@@ -102,25 +112,25 @@ def annotate_frame(frame, detections, target_idx=0):
 
 
 if __name__ == "__main__":
-    # Quick test with webcam
     import sys
     cam_idx = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    label = sys.argv[2] if len(sys.argv) > 2 else None
     print(f"Opening camera {cam_idx}...")
     cap = cv2.VideoCapture(cam_idx)
     if not cap.isOpened():
         print("Failed to open camera")
         sys.exit(1)
 
-    print("Running YOLO detection (press 'q' to quit)...")
+    print(f"Running GroundingDINO detection (label={label}, press 'q' to quit)...")
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        detections = detect_objects(frame)
+        detections = detect_objects(frame, label)
         annotated = annotate_frame(frame, detections)
         for d in detections[:3]:
             print(f"  {d['label']:15s} {d['confidence']:.0%}  center=({d['center'][0]:.0f}, {d['center'][1]:.0f})")
-        cv2.imshow("YOLO Detection", annotated)
+        cv2.imshow("GroundingDINO Detection", annotated)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 

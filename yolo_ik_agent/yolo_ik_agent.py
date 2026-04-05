@@ -30,7 +30,7 @@ from config import (
     ROBOT_SERVER, TABLE_Z, GRIPPER_CLEARANCE, GRIPPER_APPROACH_HEIGHT,
     CAM_TOP_WIDTH, CAM_TOP_HEIGHT, CAM_WRIST_WIDTH, CAM_WRIST_HEIGHT,
     TOP_CAM_X, TOP_CAM_Y, TOP_CAM_Z, TOP_CAM_PITCH,
-    C
+    URDF_BASE_OFFSET, C
 )
 from detect import detect_objects, find_object_pixel, annotate_frame, get_model
 from arm_kinematics import forward_kinematics, inverse_kinematics, get_wrist_camera_pose, get_chain
@@ -38,8 +38,29 @@ from camera_calibration import load_calibration, pixel_to_table_ray, triangulate
 
 
 # ---- Shared state ----
-SLOW_MOVE_STEPS = 8
-SLOW_MOVE_DELAY = 0.08
+SLOW_MOVE_STEPS = 20
+SLOW_MOVE_DELAY = 0.05
+
+# ---- Coordinate transforms ----
+# Physical world: +X = right, +Y = forward, +Z = up (relative to arm base on table)
+# URDF/IKPy:     +X ≈ up,    +Z ≈ forward,  +Y ≈ left
+_URDF_BASE = np.array(URDF_BASE_OFFSET)
+
+def physical_to_urdf(xyz):
+    """Physical [right, forward, up] → URDF coords for IK."""
+    return np.array([
+        xyz[1] + _URDF_BASE[0],   # physical forward → URDF +X
+        -xyz[0] + _URDF_BASE[1],  # physical right → URDF -Y
+        xyz[2] + _URDF_BASE[2],   # physical up → URDF +Z
+    ])
+
+def urdf_to_physical(urdf_xyz):
+    """URDF coords from FK → physical [right, forward, up]."""
+    return np.array([
+        -(urdf_xyz[1] - _URDF_BASE[1]),  # URDF -Y → physical right
+        urdf_xyz[0] - _URDF_BASE[0],     # URDF +X → physical forward
+        urdf_xyz[2] - _URDF_BASE[2],     # URDF +Z → physical up
+    ])
 
 
 def get_status():
@@ -70,8 +91,8 @@ def get_snapshot(camera="top", full_res=True):
         return None
 
 
-def move_joints(joints):
-    """Send joint positions to the server (hardware space)."""
+def _send_joints(joints):
+    """Send joint positions to the server directly (no interpolation)."""
     try:
         r = requests.post(f"{ROBOT_SERVER}/move", json=joints, timeout=10)
         return r.json()
@@ -79,13 +100,62 @@ def move_joints(joints):
         return {"error": str(e)}
 
 
+PRESETS = {
+    "home":    {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
+    "ready":   {"shoulder_pan": 0, "shoulder_lift": 40, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
+    "default": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0},
+    "rest":    {"shoulder_pan": -1.10, "shoulder_lift": -102.24, "elbow_flex": 96.57, "wrist_flex": 76.35, "wrist_roll": -86.02, "gripper": 1.20},
+    "drop":    {"shoulder_pan": -47.08, "shoulder_lift": 10.46, "elbow_flex": -12.44, "wrist_flex": 86.20, "wrist_roll": -94.64, "gripper": 0},
+}
+
+
+def _get_current_joints_dict():
+    """Get current joint positions as a dict."""
+    status = get_status()
+    if not status or not status.get("joints"):
+        return None
+    joints = status["joints"]
+    result = {}
+    for k, v in joints.items():
+        clean = k.replace(".pos", "")
+        result[clean] = float(v)
+    return result
+
+
+def _interpolate_move(target_joints, steps=None, delay=None):
+    """Smoothly interpolate from current position to target joints."""
+    if steps is None:
+        steps = SLOW_MOVE_STEPS
+    if delay is None:
+        delay = SLOW_MOVE_DELAY
+
+    current = _get_current_joints_dict()
+    if current is None:
+        return _send_joints(target_joints)
+
+    for step in range(1, steps + 1):
+        t = step / steps
+        interp = {}
+        for joint, target_val in target_joints.items():
+            cur_val = current.get(joint, target_val)
+            interp[joint] = cur_val + (target_val - cur_val) * t
+        result = _send_joints(interp)
+        if "error" in result:
+            return result
+        time.sleep(delay)
+    return {"ok": True}
+
+
+def move_joints(joints):
+    """Send joint positions to the server with smooth interpolation."""
+    return _interpolate_move(joints)
+
+
 def move_preset(name):
-    """Move to a named preset."""
-    try:
-        r = requests.post(f"{ROBOT_SERVER}/move_preset", json={"pose": name}, timeout=10)
-        return r.json()
-    except Exception as e:
-        return {"error": str(e)}
+    """Move to a named preset with smooth interpolation."""
+    if name not in PRESETS:
+        return {"error": f"Unknown preset: {name}"}
+    return _interpolate_move(PRESETS[name])
 
 
 def get_joint_angles():
@@ -108,15 +178,19 @@ def get_joint_angles():
 
 
 def move_to_xyz(target_xyz, current_angles=None):
-    """Compute IK and move the arm to a 3D position.
+    """Compute IK and move the arm to a 3D position (physical coords: right, forward, up).
     Returns the computed joint angles or None on failure."""
-    print(f"{C.BLUE}[ik]{C.RESET} Target: x={target_xyz[0]*100:.1f}cm y={target_xyz[1]*100:.1f}cm z={target_xyz[2]*100:.1f}cm")
+    print(f"{C.BLUE}[ik]{C.RESET} Target (physical): right={target_xyz[0]*100:.1f}cm fwd={target_xyz[1]*100:.1f}cm up={target_xyz[2]*100:.1f}cm")
+
+    # Convert physical world coords to URDF frame for IK
+    urdf_target = physical_to_urdf(target_xyz)
+    print(f"{C.DIM}[ik] URDF target: x={urdf_target[0]*100:.1f} y={urdf_target[1]*100:.1f} z={urdf_target[2]*100:.1f}{C.RESET}")
 
     if current_angles is None:
         current_angles = get_joint_angles()
 
     try:
-        angles = inverse_kinematics(target_xyz, current_angles)
+        angles = inverse_kinematics(urdf_target, current_angles)
     except Exception as e:
         print(f"{C.RED}[ik]{C.RESET} IK failed: {e}")
         return None
@@ -124,13 +198,18 @@ def move_to_xyz(target_xyz, current_angles=None):
     print(f"{C.GREEN}[ik]{C.RESET} Solution: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}")
 
     # Verify with FK
-    verify = forward_kinematics(angles)
-    error = np.linalg.norm(np.array(target_xyz) - verify) * 100
+    verify_urdf = forward_kinematics(angles)
+    error = np.linalg.norm(urdf_target - verify_urdf) * 100
     print(f"{C.DIM}[ik] FK verify error: {error:.2f} cm{C.RESET}")
     if error > 5.0:
         print(f"{C.YELLOW}[ik]{C.RESET} Warning: IK error is large ({error:.1f}cm) — solution may be inaccurate")
 
-    # Send to robot (convert to hardware joint names)
+    # Lock wrist flex at 45 degrees (gripper points down at 45°)
+    angles[3] = 45.0
+    # Lock wrist roll at -90 degrees
+    angles[4] = -90.0
+
+    # Send to robot with smooth interpolation
     joint_cmd = {
         "shoulder_pan": angles[0],
         "shoulder_lift": angles[1],
@@ -138,7 +217,7 @@ def move_to_xyz(target_xyz, current_angles=None):
         "wrist_flex": angles[3],
         "wrist_roll": angles[4],
     }
-    result = move_joints(joint_cmd)
+    result = _interpolate_move(joint_cmd)
     if "error" in result:
         print(f"{C.RED}[move]{C.RESET} Error: {result['error']}")
         return None
@@ -146,14 +225,22 @@ def move_to_xyz(target_xyz, current_angles=None):
 
 
 def get_top_camera_extrinsics():
-    """Get the top camera's position and rotation in world frame."""
+    """Get the top camera's position and rotation in physical world frame.
+    Physical world: +X = right, +Y = forward, +Z = up.
+    Camera: +Z = into scene, +X = right in image, +Y = down in image.
+    Camera looks along +Y (forward) and pitched down by TOP_CAM_PITCH."""
     position = np.array([TOP_CAM_X, TOP_CAM_Y, TOP_CAM_Z])
-    # Camera looking straight down: Z axis of camera = -Z world
-    pitch_rad = np.radians(TOP_CAM_PITCH)
+    p = np.radians(TOP_CAM_PITCH)  # negative = looking downward
+    s, c = np.sin(p), np.cos(p)
+    # cam +Z → physical [0, c, s] (forward + down)
+    # cam +X → physical [1, 0, 0] (image right = physical right)
+    # cam +Y → physical [0, -s, c] ... computed as cross(Z,X)→ [0*s-s*0, s*1-0*0, 0*0-c*1] nah let me just derive:
+    # cam +Y = (cam +Z) × (cam +X) in physical frame:
+    #   [0,c,s] × [1,0,0] = [c*0-s*0, s*1-0*0, 0*0-c*1] = [0, s, -c]
     rotation = np.array([
-        [1, 0, 0],
-        [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
-        [0, np.sin(pitch_rad), np.cos(pitch_rad)]
+        [1,  0,  0],
+        [0,  s,  c],
+        [0, -c,  s],
     ])
     return position, rotation
 
@@ -167,7 +254,7 @@ def detect_and_locate(target_label=None, use_triangulation=False):
     Returns: (x, y, z) in meters, or None.
     """
     # Load top camera calibration
-    top_matrix, top_dist, _ = load_calibration(TOP_CALIB_FILE)
+    top_matrix, top_dist, calib_res = load_calibration(TOP_CALIB_FILE)
     if top_matrix is None:
         print(f"{C.RED}[detect]{C.RESET} Top camera not calibrated! Run:")
         print(f"  python camera_calibration.py --camera top --index <N>")
@@ -178,6 +265,20 @@ def detect_and_locate(target_label=None, use_triangulation=False):
     if frame_top is None:
         print(f"{C.RED}[detect]{C.RESET} Cannot get top camera frame")
         return None
+
+    # Scale calibration matrix if frame resolution differs from calibration resolution
+    if calib_res is not None:
+        frame_h, frame_w = frame_top.shape[:2]
+        calib_w, calib_h = calib_res
+        if frame_w != calib_w or frame_h != calib_h:
+            sx = frame_w / calib_w
+            sy = frame_h / calib_h
+            top_matrix = top_matrix.copy()
+            top_matrix[0, 0] *= sx  # fx
+            top_matrix[0, 2] *= sx  # cx
+            top_matrix[1, 1] *= sy  # fy
+            top_matrix[1, 2] *= sy  # cy
+            print(f"{C.DIM}[detect] Scaled calibration {calib_w}x{calib_h} → {frame_w}x{frame_h}{C.RESET}")
 
     # Detect with YOLO
     print(f"{C.BLUE}[detect]{C.RESET} Running YOLO on top camera...")
@@ -251,7 +352,7 @@ def pickup_sequence(target_label):
 
     # Step 2: Open gripper
     print(f"{C.BLUE}[2/6]{C.RESET} Opening gripper...")
-    move_joints({"gripper": 100})
+    _send_joints({"gripper": 100})
     time.sleep(0.5)
 
     # Step 3: Detect and locate
@@ -281,7 +382,7 @@ def pickup_sequence(target_label):
 
     # Step 6: Close gripper
     print(f"{C.BLUE}[6/6]{C.RESET} Closing gripper...")
-    move_joints({"gripper": 0})
+    _send_joints({"gripper": 0})
     time.sleep(1)
 
     # Lift
@@ -298,7 +399,7 @@ def pickup_sequence(target_label):
 
     # Open gripper
     print(f"{C.BLUE}[drop]{C.RESET} Dropping...")
-    move_joints({"gripper": 100})
+    _send_joints({"gripper": 100})
     time.sleep(0.5)
 
     print(f"\n{C.GREEN}{C.BOLD}Pickup complete!{C.RESET}\n")
@@ -373,8 +474,10 @@ def print_help():
     print(f"  {C.CYAN}pick up <object>{C.RESET}     — detect and pick up an object")
     print(f"  {C.CYAN}/detect [label]{C.RESET}       — run YOLO detection on top camera")
     print(f"  {C.CYAN}/locate [label]{C.RESET}       — detect + compute 3D position")
-    print(f"  {C.CYAN}/ik <x> <y> <z>{C.RESET}      — move to 3D position (cm)")
+    print(f"  {C.CYAN}http://localhost:7878/stream{C.RESET} — YOLO debug viewer")
+    print(f"  {C.CYAN}/ik <r> <f> <u>{C.RESET}      — move to position (right, fwd, up in cm)")
     print(f"  {C.CYAN}/fk{C.RESET}                   — show current gripper 3D position")
+    print(f"  {C.CYAN}/t [on|off]{C.RESET}           — toggle torque")
     print(f"  {C.CYAN}/home{C.RESET}                 — move to home position")
     print(f"  {C.CYAN}/ready{C.RESET}                — move to ready position")
     print(f"  {C.CYAN}/calibrate <cam>{C.RESET}      — run camera calibration")
@@ -429,11 +532,11 @@ def run_agent():
                 label = " ".join(parts[1:]) if len(parts) > 1 else None
                 pos = detect_and_locate(label)
                 if pos is not None:
-                    print(f"  Position: x={pos[0]*100:.1f}cm y={pos[1]*100:.1f}cm z={pos[2]*100:.1f}cm")
+                    print(f"  Position: right={pos[0]*100:.1f}cm fwd={pos[1]*100:.1f}cm up={pos[2]*100:.1f}cm")
 
             elif cmd == "/ik":
                 if len(parts) != 4:
-                    print(f"  Usage: /ik <x_cm> <y_cm> <z_cm>")
+                    print(f"  Usage: /ik <right_cm> <fwd_cm> <up_cm>")
                 else:
                     try:
                         x, y, z = float(parts[1])/100, float(parts[2])/100, float(parts[3])/100
@@ -444,9 +547,28 @@ def run_agent():
             elif cmd == "/fk":
                 angles = get_joint_angles()
                 if angles:
-                    pos = forward_kinematics(angles)
-                    print(f"  Gripper at: x={pos[0]*100:.1f}cm y={pos[1]*100:.1f}cm z={pos[2]*100:.1f}cm")
+                    urdf_pos = forward_kinematics(angles)
+                    phys = urdf_to_physical(urdf_pos)
+                    print(f"  Gripper at: right={phys[0]*100:.1f}cm fwd={phys[1]*100:.1f}cm up={phys[2]*100:.1f}cm")
                     print(f"  Angles: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}")
+
+            elif cmd in ("/t", "/torque"):
+                # Toggle or set torque
+                if len(parts) > 1 and parts[1].lower() in ("on", "1"):
+                    enabled = True
+                elif len(parts) > 1 and parts[1].lower() in ("off", "0"):
+                    enabled = False
+                else:
+                    # Toggle: check current state
+                    status = get_status()
+                    enabled = not status.get("torque", True) if status else False
+                try:
+                    r = requests.post(f"{ROBOT_SERVER}/enable", json={"enabled": enabled}, timeout=5)
+                    state = "ON" if enabled else "OFF"
+                    color = C.GREEN if enabled else C.YELLOW
+                    print(f"  {color}Torque {state}{C.RESET}")
+                except Exception as e:
+                    print(f"  {C.RED}Error: {e}{C.RESET}")
 
             elif cmd in ("/home",):
                 move_preset("home")
