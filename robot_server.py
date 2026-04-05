@@ -970,6 +970,8 @@ function tlStep(){
   tlPos++;
   document.getElementById('tl-slider').value=tlPos;
   tlUpdateTime(tlPos);
+  // Move arm to this position
+  post('/history/goto',{joints:tlData[tlPos].joints});
   // Calculate delay based on actual time diff and speed
   let dt=500; // default
   if(tlPos<tlData.length-1)dt=(tlData[tlPos+1].t-tlData[tlPos].t)*1000/speed;
