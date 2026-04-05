@@ -619,6 +619,8 @@ def print_help():
     print(f"  {C.CYAN}/maincam{C.RESET} <top|wrist>  — set free-mode camera")
     print(f"  {C.CYAN}/calib{C.RESET}               — calibrate floor distance for pickup")
     print(f"  {C.CYAN}/teleop{C.RESET} [start|stop]  — leader arm teleoperation")
+    print(f"  {C.CYAN}/timeline{C.RESET} [-on|-off]  — toggle position recording")
+    print(f"  {C.CYAN}/info{C.RESET}                — system status {C.DIM}(alias: /status){C.RESET}")
     print(f"  {C.CYAN}/doctor{C.RESET}              — run full diagnostics")
     print(f"\n{C.BOLD}Joint aliases:{C.RESET} {C.DIM}sp sl ef wf wr g  (or: pan lift elbow flex roll grip){C.RESET}")
     print(f"{C.BOLD}Quit:{C.RESET} quit / exit / q\n")
@@ -1288,6 +1290,81 @@ def run_agent():
                         print(f"{C.RED}[teleop]{C.RESET} Error: {e}")
                 else:
                     print(f"{C.YELLOW}[teleop]{C.RESET} Usage: /teleop [start [port] | stop]")
+
+            elif cmd == "/timeline":
+                action = parts[1].lower() if len(parts) > 1 else None
+                if action == "-on":
+                    try:
+                        requests.post(f"{ROBOT_SERVER}/timeline", json={"enabled": True}, timeout=5)
+                        print(f"{C.GREEN}[timeline]{C.RESET} Recording enabled")
+                        push_chat("Timeline recording enabled.", role="agent")
+                    except Exception as e:
+                        print(f"{C.RED}[timeline]{C.RESET} Error: {e}")
+                elif action == "-off":
+                    try:
+                        requests.post(f"{ROBOT_SERVER}/timeline", json={"enabled": False}, timeout=5)
+                        print(f"{C.YELLOW}[timeline]{C.RESET} Recording disabled")
+                        push_chat("Timeline recording disabled.", role="agent")
+                    except Exception as e:
+                        print(f"{C.RED}[timeline]{C.RESET} Error: {e}")
+                else:
+                    print(f"  {C.CYAN}/timeline -on{C.RESET}   — enable position recording")
+                    print(f"  {C.CYAN}/timeline -off{C.RESET}  — disable position recording")
+
+            elif cmd in ("/info", "/status"):
+                try:
+                    r = requests.get(f"{ROBOT_SERVER}/status", timeout=5)
+                    s = r.json()
+                    print(f"\n{C.BOLD}System Status{C.RESET}")
+                    # Arm
+                    arm_color = C.GREEN if s.get("robot_connected") else C.RED
+                    print(f"  Follower arm:  {arm_color}{'connected' if s.get('robot_connected') else 'disconnected'}{C.RESET}", end="")
+                    if s.get("robot_port"):
+                        print(f" {C.DIM}({s['robot_port']}){C.RESET}")
+                    else:
+                        print()
+                    # Leader
+                    leader_ok = s.get("leader_connected", False)
+                    leader_color = C.GREEN if leader_ok else C.DIM
+                    print(f"  Leader arm:    {leader_color}{'connected' if leader_ok else 'disconnected'}{C.RESET}", end="")
+                    if s.get("leader_port"):
+                        print(f" {C.DIM}({s['leader_port']}){C.RESET}")
+                    else:
+                        print()
+                    # Torque & Teleop
+                    t_color = C.GREEN if s.get("torque_enabled") else C.YELLOW
+                    print(f"  Torque:        {t_color}{'ON' if s.get('torque_enabled') else 'OFF'}{C.RESET}")
+                    tp_color = C.GREEN if s.get("teleop_active") else C.DIM
+                    print(f"  Teleop:        {tp_color}{'active' if s.get('teleop_active') else 'off'}{C.RESET}", end="")
+                    if s.get("teleop_active"):
+                        print(f" {C.DIM}({s.get('teleop_fps', 60)} hz){C.RESET}")
+                    else:
+                        print()
+                    # Cameras
+                    cam_info = s.get("camera_info", {})
+                    for cam_name in ["top", "wrist"]:
+                        ci = cam_info.get(cam_name)
+                        if ci:
+                            print(f"  {cam_name:13s}  {C.GREEN}connected{C.RESET} {C.DIM}({ci.get('name', '?')} /dev/video{ci.get('index', '?')}){C.RESET}")
+                        else:
+                            print(f"  {cam_name:13s}  {C.RED}disconnected{C.RESET}")
+                    # Calibration
+                    fd = s.get("floor_drop")
+                    print(f"  Floor drop:    {C.CYAN}{fd:.1f}°{C.RESET}" if fd else f"  Floor drop:    {C.DIM}not calibrated{C.RESET}")
+                    # Timeline
+                    tl = s.get("history_enabled", False)
+                    tl_color = C.GREEN if tl else C.DIM
+                    print(f"  Timeline:      {tl_color}{'recording' if tl else 'off'}{C.RESET}")
+                    # Joints
+                    joints = s.get("joints", {})
+                    if joints and "error" not in joints:
+                        agent_joints = hardware_to_agent(joints)
+                        print(f"\n{C.BOLD}Joint Positions{C.RESET}")
+                        for name, val in agent_joints.items():
+                            print(f"  {name:16s} {C.CYAN}{val:7.1f}°{C.RESET}")
+                    print()
+                except Exception as e:
+                    print(f"{C.RED}[status]{C.RESET} Error: {e}")
 
             else:
                 print(f"{C.YELLOW}Unknown command: {cmd}{C.RESET} — type {C.CYAN}/help{C.RESET} for available commands")

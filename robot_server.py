@@ -79,10 +79,14 @@ HISTORY_MAX_SECS = 600   # 10 minutes
 HISTORY_MAX_SAMPLES = int(HISTORY_MAX_SECS / HISTORY_INTERVAL)
 joint_history = []       # [{t: float, joints: {k: v, ...}}, ...]
 history_lock = threading.Lock()
+history_enabled = True    # can be toggled via /timeline endpoint or agent command
 
 def history_recorder():
     """Background thread: sample joint positions into rolling buffer."""
     while True:
+        if not history_enabled:
+            time.sleep(0.5)
+            continue
         # Use trylock to avoid blocking teleop — skip sample if bus is busy
         if robot_lock.acquire(timeout=0.05):
             try:
@@ -374,6 +378,7 @@ def status():
         "teleop_active": teleop_active,
         "teleop_fps": TELEOP_FPS,
         "floor_drop": floor_drop,
+        "history_enabled": history_enabled,
         "agent": agent_state,
         "timestamp": time.time()
     })
@@ -568,7 +573,8 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
       <div class="cam-box"><p>Wrist</p><img src="/stream/wrist"></div>
     </div>
     <div class="card" style="padding:10px">
-      <h2>Timeline <span style="font-size:10px;color:#555;text-transform:none;letter-spacing:0">(last 10 min)</span></h2>
+      <h2 style="display:flex;align-items:center;justify-content:space-between">Timeline <span style="font-size:10px;color:#555;text-transform:none;letter-spacing:0">(last 10 min)</span>
+        <button class="btn" id="tl-toggle" style="min-width:40px;padding:2px 8px;font-size:10px;flex:0" onclick="tlOnOff()">ON</button></h2>
       <div style="display:flex;align-items:center;gap:8px">
         <button class="btn" style="min-width:32px;padding:4px;font-size:14px" id="tl-play" onclick="tlToggle()">&#9654;</button>
         <input type="range" id="tl-slider" min="0" max="0" value="0" step="1"
@@ -816,6 +822,8 @@ function poll(){
     document.getElementById('confirm-section').style.display=a.confirm_pending?'flex':'none';
     // Advanced panel
     updateAdv(d);
+    // Timeline toggle
+    if(d.history_enabled!==undefined)tlUpdateToggle(d.history_enabled);
   }).catch(()=>{
     document.getElementById('dot').className='status-dot err';
     document.getElementById('conn-text').textContent='Disconnected';
@@ -987,6 +995,12 @@ function tlGoTo(){
   if(tlPos<0||tlPos>=tlData.length)return;
   let joints=tlData[tlPos].joints;
   post('/history/goto',{joints:joints});
+}
+function tlOnOff(){post('/timeline',{});}
+function tlUpdateToggle(enabled){
+  let btn=document.getElementById('tl-toggle');
+  if(enabled){btn.textContent='ON';btn.className='btn btn-green';btn.style.minWidth='40px';btn.style.padding='2px 8px';btn.style.fontSize='10px';btn.style.flex='0';}
+  else{btn.textContent='OFF';btn.className='btn btn-red';btn.style.minWidth='40px';btn.style.padding='2px 8px';btn.style.fontSize='10px';btn.style.flex='0';}
 }
 tlLoad();setInterval(tlLoad,5000);
 </script>
@@ -1286,6 +1300,17 @@ def set_calibration():
 
 
 # ---- History ----
+
+@app.route("/timeline", methods=["POST"])
+def toggle_timeline():
+    global history_enabled
+    data = request.json or {}
+    if "enabled" in data:
+        history_enabled = bool(data["enabled"])
+    else:
+        history_enabled = not history_enabled
+    print(f"{C.CYAN}[timeline]{C.RESET} Recording {'enabled' if history_enabled else 'disabled'}")
+    return jsonify({"ok": True, "history_enabled": history_enabled})
 
 @app.route("/history")
 def get_history():
