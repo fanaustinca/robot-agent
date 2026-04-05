@@ -781,7 +781,7 @@ def move_direction():
     elif direction == "backward":
         targets = {
             "shoulder_lift": cur("shoulder_lift") - degrees,
-            "elbow_flex": cur("elbow_flex") - degrees * ELBOW_BACKWARD_RATIO,
+            "elbow_flex": cur("elbow_flex") + degrees * ELBOW_BACKWARD_RATIO,
         }
     elif direction == "left":
         targets = {"shoulder_pan": cur("shoulder_pan") - degrees}
