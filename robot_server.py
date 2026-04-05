@@ -748,8 +748,8 @@ def move():
         return jsonify({"error": str(e)}), 500
 
 # ---- Forward/Backward Elbow Compensation (must match gemini_robot_agent.py) ----
-ELBOW_FORWARD_RATIO  = 2.0
-ELBOW_BACKWARD_RATIO = 0.6
+ELBOW_FORWARD_RATIO  = 2.5
+ELBOW_BACKWARD_RATIO = 0.4
 
 @app.route("/move_direction", methods=["POST"])
 def move_direction():
