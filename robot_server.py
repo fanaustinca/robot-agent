@@ -74,7 +74,7 @@ teleop_active = False
 teleop_thread = None
 
 # ---- Joint Position History (rolling 10 min buffer) ----
-HISTORY_INTERVAL = 0.5   # seconds between samples
+HISTORY_INTERVAL = 0.1   # seconds between samples (10hz)
 HISTORY_MAX_SECS = 600   # 10 minutes
 HISTORY_MAX_SAMPLES = int(HISTORY_MAX_SECS / HISTORY_INTERVAL)
 joint_history = []       # [{t: float, joints: {k: v, ...}}, ...]
@@ -1297,9 +1297,9 @@ def get_history():
             data = [h for h in joint_history if h["t"] >= cutoff]
         else:
             data = list(joint_history)
-    # Thin out if too many points for the dashboard (max ~600 points)
-    if len(data) > 600:
-        step = len(data) // 600
+    # Thin out if too many points for the dashboard (max ~3000 points)
+    if len(data) > 3000:
+        step = len(data) // 3000
         data = data[::step]
     return jsonify({"samples": len(data), "data": data})
 
