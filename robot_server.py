@@ -73,6 +73,24 @@ torque_enabled = False
 teleop_active = False
 teleop_thread = None
 
+# ---- Joint Position History (rolling 10 min buffer) ----
+HISTORY_INTERVAL = 0.5   # seconds between samples
+HISTORY_MAX_SECS = 600   # 10 minutes
+HISTORY_MAX_SAMPLES = int(HISTORY_MAX_SECS / HISTORY_INTERVAL)
+joint_history = []       # [{t: float, joints: {k: v, ...}}, ...]
+history_lock = threading.Lock()
+
+def history_recorder():
+    """Background thread: sample joint positions into rolling buffer."""
+    while True:
+        joints = get_joint_positions()
+        if joints and "error" not in joints:
+            with history_lock:
+                joint_history.append({"t": time.time(), "joints": dict(joints)})
+                if len(joint_history) > HISTORY_MAX_SAMPLES:
+                    joint_history[:] = joint_history[-HISTORY_MAX_SAMPLES:]
+        time.sleep(HISTORY_INTERVAL)
+
 # ---- Agent Activity State (set by agent, read by dashboard) ----
 agent_state = {
     "phase": "idle",         # idle, calibrating, homing, aligning, waiting_confirm, lowering, gripping, lifting, dropping, done
@@ -539,6 +557,29 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
       <div class="cam-box"><p>Top</p><img src="/stream/top"></div>
       <div class="cam-box"><p>Wrist</p><img src="/stream/wrist"></div>
     </div>
+    <div class="card" style="padding:10px">
+      <h2>Timeline <span style="font-size:10px;color:#555;text-transform:none;letter-spacing:0">(last 10 min)</span></h2>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn" style="min-width:32px;padding:4px;font-size:14px" id="tl-play" onclick="tlToggle()">&#9654;</button>
+        <input type="range" id="tl-slider" min="0" max="0" value="0" step="1"
+               style="flex:1;-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;background:#333;outline:none;cursor:pointer"
+               oninput="tlSeek(this.value)">
+        <span id="tl-time" style="font-size:11px;color:#888;font-family:'SF Mono',monospace;min-width:48px">--:--</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+        <span style="font-size:11px;color:#666">Speed:</span>
+        <select id="tl-speed" style="background:#222;border:1px solid #444;border-radius:4px;color:#eee;font-size:11px;padding:2px 4px">
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+          <option value="10">10x</option>
+        </select>
+        <span style="font-size:11px;color:#666;margin-left:auto" id="tl-info">0 samples</span>
+        <button class="btn" style="min-width:50px;padding:3px 6px;font-size:11px" onclick="tlGoTo()">Go To</button>
+      </div>
+    </div>
     <div class="chat-card">
       <h2>Chat</h2>
       <div class="chat-log" id="chat-log"></div>
@@ -872,6 +913,75 @@ function pollChat(){
   }).catch(()=>{});
 }
 pollChat();setInterval(pollChat,500);
+
+// ---- Timeline ----
+let tlData=[];let tlPlaying=false;let tlTimer=null;let tlPos=0;
+function tlLoad(){
+  fetch('/history').then(r=>r.json()).then(d=>{
+    tlData=d.data||[];
+    let slider=document.getElementById('tl-slider');
+    slider.max=Math.max(0,tlData.length-1);
+    if(!tlPlaying)slider.value=slider.max;
+    document.getElementById('tl-info').textContent=tlData.length+' samples';
+    if(!tlPlaying&&tlData.length>0)tlUpdateTime(tlData.length-1);
+  }).catch(()=>{});
+}
+function tlUpdateTime(idx){
+  if(idx<0||idx>=tlData.length)return;
+  let t0=tlData[0].t;
+  let elapsed=tlData[idx].t-t0;
+  let min=Math.floor(elapsed/60);
+  let sec=Math.floor(elapsed%60);
+  document.getElementById('tl-time').textContent=min+':'+(sec<10?'0':'')+sec;
+  // Update joint display to show historical values
+  let joints=tlData[idx].joints;
+  for(let j of JOINT_ORDER){
+    let deg=document.getElementById('deg-'+j);
+    let sld=document.getElementById('sld-'+j);
+    let inp=document.getElementById('inp-'+j);
+    let k=Object.keys(joints).find(x=>x.replace('.pos','')==j);
+    let v=k?joints[k]:0;
+    if(typeof v!=='number')continue;
+    if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
+    if(sld&&document.activeElement!==sld)sld.value=v;
+    if(inp&&document.activeElement!==inp)inp.value=v.toFixed(1);
+  }
+}
+function tlSeek(val){
+  tlPos=parseInt(val);
+  tlUpdateTime(tlPos);
+}
+function tlToggle(){
+  if(tlPlaying){tlStop();return;}
+  if(tlData.length<2)return;
+  tlPlaying=true;
+  document.getElementById('tl-play').innerHTML='&#9646;&#9646;';
+  if(tlPos>=tlData.length-1)tlPos=0;
+  tlStep();
+}
+function tlStep(){
+  if(!tlPlaying||tlPos>=tlData.length-1){tlStop();return;}
+  let speed=parseFloat(document.getElementById('tl-speed').value)||1;
+  tlPos++;
+  document.getElementById('tl-slider').value=tlPos;
+  tlUpdateTime(tlPos);
+  // Calculate delay based on actual time diff and speed
+  let dt=500; // default
+  if(tlPos<tlData.length-1)dt=(tlData[tlPos+1].t-tlData[tlPos].t)*1000/speed;
+  dt=Math.max(16,Math.min(2000,dt));
+  tlTimer=setTimeout(tlStep,dt);
+}
+function tlStop(){
+  tlPlaying=false;
+  document.getElementById('tl-play').innerHTML='&#9654;';
+  if(tlTimer){clearTimeout(tlTimer);tlTimer=null;}
+}
+function tlGoTo(){
+  if(tlPos<0||tlPos>=tlData.length)return;
+  let joints=tlData[tlPos].joints;
+  post('/history/goto',{joints:joints});
+}
+tlLoad();setInterval(tlLoad,5000);
 </script>
 </body></html>"""
 
@@ -1159,6 +1269,42 @@ def set_calibration():
     return jsonify({"error": "Provide 'floor_drop'"}), 400
 
 
+# ---- History ----
+
+@app.route("/history")
+def get_history():
+    """Get joint position history. ?last=N returns last N seconds (default all)."""
+    last = float(request.args.get("last", 0))
+    with history_lock:
+        if last > 0:
+            cutoff = time.time() - last
+            data = [h for h in joint_history if h["t"] >= cutoff]
+        else:
+            data = list(joint_history)
+    # Thin out if too many points for the dashboard (max ~600 points)
+    if len(data) > 600:
+        step = len(data) // 600
+        data = data[::step]
+    return jsonify({"samples": len(data), "data": data})
+
+@app.route("/history/goto", methods=["POST"])
+def history_goto():
+    """Move arm to a specific position from history."""
+    if robot is None:
+        return jsonify({"error": "Robot not connected"}), 503
+    data = request.json or {}
+    joints = data.get("joints")
+    if not joints:
+        return jsonify({"error": "Provide 'joints'"}), 400
+    try:
+        action = {k: float(v) for k, v in joints.items()}
+        with robot_lock:
+            robot.send_action(action)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ---- Chat ----
 
 @app.route("/chat", methods=["GET"])
@@ -1314,5 +1460,8 @@ if __name__ == "__main__":
     print(f"{C.DIM}[boot] Robot port: {ROBOT_PORT}{C.RESET}")
     init_robot()
     init_cameras()
+    # Start background history recorder
+    threading.Thread(target=history_recorder, daemon=True).start()
+    print(f"{C.GREEN}[boot]{C.RESET} History recorder started (sampling every {HISTORY_INTERVAL}s, {HISTORY_MAX_SECS//60}min buffer)")
     run_diagnostics()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
