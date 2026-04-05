@@ -788,10 +788,16 @@ def move_direction():
         targets = {"shoulder_pan": cur("shoulder_pan") - degrees}
     elif direction == "right":
         targets = {"shoulder_pan": cur("shoulder_pan") + degrees}
+    # Interpolate in 8 steps so shoulder and elbow move together (avoids floor crash)
+    start = {k: cur(k) for k in targets}
+    steps = 8
     try:
-        action = {f"{k}.pos": float(v) for k, v in targets.items()}
-        with robot_lock:
-            robot.send_action(action)
+        for s in range(1, steps + 1):
+            t = s / steps
+            action = {f"{k}.pos": start[k] + (targets[k] - start[k]) * t for k in targets}
+            with robot_lock:
+                robot.send_action(action)
+            time.sleep(0.08)
         return jsonify({"ok": True, "direction": direction, "degrees": degrees, "sent": targets})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
