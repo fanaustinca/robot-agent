@@ -10,7 +10,7 @@ ROBOT_SERVER = os.environ.get("ROBOT_SERVER", "http://localhost:7878")
 
 # ---- Arm Geometry (meters for IKPy) ----
 # Measured from the SO-101 arm
-ARM_BASE_HEIGHT = 0.12      # shoulder pivot above table (12 cm)
+ARM_BASE_HEIGHT = 0.05      # shoulder pivot above table (5 cm)
 ARM_LOWER_LENGTH = 0.115    # shoulder pivot to elbow pivot (11.5 cm)
 ARM_UPPER_LENGTH = 0.30     # elbow pivot to wrist/gripper (30 cm)
 ARM_GRIPPER_LENGTH = 0.05   # wrist to gripper tip (estimated 5 cm)
@@ -42,10 +42,10 @@ CHECKERBOARD_SQUARE_SIZE = 0.025     # 2.5 cm per square (measure your printout)
 
 # ---- Top Camera Extrinsic (position relative to arm base) ----
 # Measure these from your setup — distance from arm base to directly below camera
-# x = forward from arm base, y = left, z = up
-TOP_CAM_X = 0.0             # camera centered over workspace (adjust to match)
-TOP_CAM_Y = 0.0             # camera centered left-right
-TOP_CAM_Z = 0.40            # camera height above table (40 cm — measure this)
+# x = forward from arm base, y = left (positive) / right (negative), z = up
+TOP_CAM_X = 0.0             # camera roughly centered forward/back (adjust if offset)
+TOP_CAM_Y = -0.21           # camera is 21 cm to the LEFT of the arm base
+TOP_CAM_Z = 0.55            # camera lens 55 cm above table
 # Camera looks straight down (adjust if angled)
 TOP_CAM_PITCH = -90.0       # degrees, -90 = looking straight down
 
