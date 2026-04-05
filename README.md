@@ -1,108 +1,96 @@
-# SO-101 Gemini Robot Agent
+# SO-101 Robot Agent
 
-Controls a SO-101 robot arm using Gemini's vision capabilities. The agent uses the wrist camera to visually align the gripper over a target object and pick it up.
+Multiple AI agents for controlling a SO-101 robot arm via a shared Flask HTTP server.
 
-## How it works
+## Project Structure
 
-Two components run together:
+```
+├── robot_server.py          # Shared Flask server (arm + cameras, port 7878)
+├── requirements.txt         # Python dependencies
+├── CLAUDE.md                # Codebase documentation for Claude Code
+│
+├── gemini_agent/            # Gemini-powered visual alignment agent
+│   ├── gemini_robot_agent.py
+│   └── HOW_TO_RUN.txt
+│
+├── claude_agent/            # Claude tool-use agent
+│   └── claude_robot_agent.py
+│
+└── yolo_ik_agent/           # YOLO + IK pick-and-place agent
+    ├── robot_server.py      # High-res server (1920x1080, GroundingDINO viewer)
+    ├── yolo_ik_agent.py     # Interactive CLI agent
+    ├── detect.py            # GroundingDINO detection
+    ├── config.py            # Configuration
+    ├── arm_kinematics.py    # FK/IK via IKPy + URDF
+    ├── camera_calibration.py
+    ├── so101.urdf
+    ├── calibration_data/
+    └── README.md            # Detailed setup guide
+```
 
-- **`robot_server.py`** — Flask HTTP server (port 7878) that talks directly to the SO-101 arm and cameras
-- **`gemini_robot_agent.py`** — Gemini-powered agent that controls the arm via the server
+## Agents
 
-### Two modes
+### Gemini Agent (`gemini_agent/`)
+Uses Gemini's vision to iteratively align the wrist camera over objects. Two modes: pick-up (visual alignment loop) and free-agent (general commands).
 
-**Pick-up mode** — triggered when your prompt is a grab/pick-up request:
-1. Move arm to home position
-2. Open gripper
-3. Lower arm toward the workspace
-4. Visual alignment loop (up to 10 iterations):
-   - Captures wrist camera image with a black dot crosshair drawn at the gripper tip
-   - Early iterations also include a top-down overview camera
-   - Gemini looks at the image and responds with a direction to move (`forward`, `backward`, `left`, `right`) or `aligned: true`
-   - Agent translates direction → joint moves and repeats
-5. Asks "Close gripper? (y/n)" — lowers, grips slowly, then lifts
+### Claude Agent (`claude_agent/`)
+General-purpose tool-use agent with 5 tools (get_status, snapshot, move_joints, move_preset, confirm_move). Uses Claude Sonnet.
 
-**Free agent mode** — for any other prompt (e.g. "go to home", "wave"):
-- Gemini gets a top camera snapshot + current joint state
-- Responds with a JSON action to move joints, use a preset, or check status
-
-> Intent detection uses keyword matching (pick up, grab, retrieve, get, fetch, take, lift, collect) — no extra API call needed.
+### YOLO + IK Agent (`yolo_ik_agent/`)
+Vision-guided pick-and-place using GroundingDINO detection, camera-to-3D projection, and inverse kinematics. See [yolo_ik_agent/README.md](yolo_ik_agent/README.md) for full setup.
 
 ## Quick Start
 
-**Step 1 — Install dependencies (first time only):**
+### 1. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-**Step 2 — Start the robot server (Terminal 1):**
+### 2. Start the shared server (Terminal 1)
 ```bash
-python3 robot_server.py
+CAM_TOP=4 CAM_WRIST=1 python3 robot_server.py
 ```
 
-Defaults to `/dev/ttyACM0`. Override with `--port`:
+### 3. Start an agent (Terminal 2)
+
+**Gemini:**
 ```bash
-python3 robot_server.py --port /dev/ttyACM1
+GEMINI_API_KEY=<key> python3 gemini_agent/gemini_robot_agent.py
 ```
 
-Wait until you see:
-```
-[boot] Server running on http://0.0.0.0:7878
-[camera] top camera opened ...
-[camera] wrist camera opened ...
-```
-
-**Step 3 — Start the Gemini agent (Terminal 2):**
+**Claude:**
 ```bash
-GEMINI_API_KEY=your_key_here python3 gemini_robot_agent.py
+ANTHROPIC_API_KEY=<key> python3 claude_agent/claude_robot_agent.py
 ```
 
-**Step 4 — Chat to control the arm:**
-```
-You: pick up the red block
-You: go to home position
-You: open the gripper
-```
-
-Type `quit` to exit.
-
-## Custom camera indices / serial port
-
+**YOLO + IK** (uses its own high-res server):
 ```bash
-# via command-line argument (recommended)
-python3 robot_server.py --port /dev/ttyACM1
-
-# via environment variables
-CAM_TOP=0 CAM_WRIST=1 ROBOT_PORT=/dev/ttyUSB0 python3 robot_server.py
+cd yolo_ik_agent
+CAM_TOP=4 CAM_WRIST=1 python3 robot_server.py   # Terminal 1
+python3 yolo_ik_agent.py                          # Terminal 2
 ```
 
-**Find your devices:**
-```bash
-ls /dev/video*           # cameras — try indices 0, 1, 2...
-ls /dev/ttyUSB* /dev/ttyACM*   # robot serial port
-```
+### 4. Dashboard
+- **http://localhost:7878/stream** — live cameras + controls
 
-The server will auto-detect cameras and serial ports if the defaults aren't found.
+## Environment Variables
 
-## API
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CAM_TOP` | 4 | Top camera /dev/video index |
+| `CAM_WRIST` | 0 | Wrist camera /dev/video index |
+| `ROBOT_PORT` | /dev/ttyACM0 | Serial port for arm |
+| `GEMINI_API_KEY` | — | Required for Gemini agent |
+| `ANTHROPIC_API_KEY` | — | Required for Claude agent |
 
-| Method | Endpoint         | Description                        |
-|--------|------------------|------------------------------------|
-| GET    | /status          | Health check + joint positions     |
-| GET    | /snapshot/top    | Top camera image (base64 JPEG)     |
-| GET    | /snapshot/wrist  | Wrist camera image (base64 JPEG)   |
-| GET    | /stream          | Live browser view of both cameras  |
-| POST   | /move            | Move joints `{"shoulder_pan": 45}` |
-| POST   | /move_preset     | Named pose `{"pose": "home"}`      |
-| POST   | /enable          | Torque on/off `{"enabled": true}`  |
+## Server API
 
-## Presets
-
-- `home` — all joints at 0
-- `ready` — arm raised and ready to work
-- `rest` — arm folded down
-
-## Image resolution
-
-Default: **256x192** JPEG at quality 60 — keeps API cost low.
-Adjust `SNAPSHOT_WIDTH`, `SNAPSHOT_HEIGHT`, `JPEG_QUALITY` in `robot_server.py` if needed.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | /status | Joint positions + health |
+| GET | /snapshot/top | Top camera (base64 JPEG) |
+| GET | /snapshot/wrist | Wrist camera (base64 JPEG) |
+| GET | /stream | Live dashboard |
+| POST | /move | Move joints `{"shoulder_pan": 45}` |
+| POST | /move_preset | Named pose `{"pose": "home"}` |
+| POST | /enable | Torque `{"enabled": true}` |
