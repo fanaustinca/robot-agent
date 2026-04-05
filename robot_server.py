@@ -782,14 +782,14 @@ def move_direction():
             if k.replace(".pos", "") == joint:
                 return float(v)
         return 0.0
-    # Compute elbow DELTA from trig (servo offset cancels out)
+    # Compute elbow DELTA from trig (negated: fold more when reaching forward)
     if direction == "forward":
         new_sh = cur("shoulder_lift") + degrees
-        elbow_delta = elbow_for_shoulder(new_sh) - elbow_for_shoulder(cur("shoulder_lift"))
+        elbow_delta = elbow_for_shoulder(cur("shoulder_lift")) - elbow_for_shoulder(new_sh)
         targets = {"shoulder_lift": new_sh, "elbow_flex": cur("elbow_flex") + elbow_delta}
     elif direction == "backward":
         new_sh = cur("shoulder_lift") - degrees
-        elbow_delta = elbow_for_shoulder(new_sh) - elbow_for_shoulder(cur("shoulder_lift"))
+        elbow_delta = elbow_for_shoulder(cur("shoulder_lift")) - elbow_for_shoulder(new_sh)
         targets = {"shoulder_lift": new_sh, "elbow_flex": cur("elbow_flex") + elbow_delta}
     elif direction == "left":
         targets = {"shoulder_pan": cur("shoulder_pan") - degrees}
@@ -804,7 +804,7 @@ def move_direction():
             # For forward/backward, compute elbow delta at each interpolated shoulder
             if direction in ("forward", "backward"):
                 sh_interp = start["shoulder_lift"] + (targets["shoulder_lift"] - start["shoulder_lift"]) * t
-                el_delta = elbow_for_shoulder(sh_interp) - elbow_for_shoulder(start["shoulder_lift"])
+                el_delta = elbow_for_shoulder(start["shoulder_lift"]) - elbow_for_shoulder(sh_interp)
                 el_interp = start["elbow_flex"] + el_delta
                 action = {"shoulder_lift.pos": sh_interp, "elbow_flex.pos": el_interp}
             else:

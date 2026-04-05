@@ -316,10 +316,10 @@ def move_direction(direction, degrees):
         # Agent space: negative shoulder_lift = down/forward
         sign = -1 if direction == "forward" else 1
         new_sh = cur("shoulder_lift") + sign * degrees
-        # Compute elbow DELTA using trig (servo offset cancels out)
-        cur_sh_hw = -cur("shoulder_lift")  # current shoulder in hardware space
-        new_sh_hw = -new_sh                # target shoulder in hardware space
-        elbow_delta = elbow_for_shoulder(new_sh_hw) - elbow_for_shoulder(cur_sh_hw)
+        # Compute elbow DELTA using trig (negated: folding more when reaching forward)
+        cur_sh_hw = -cur("shoulder_lift")
+        new_sh_hw = -new_sh
+        elbow_delta = elbow_for_shoulder(cur_sh_hw) - elbow_for_shoulder(new_sh_hw)
         new_elbow = cur("elbow_flex") + elbow_delta
         new_pos = {"shoulder_lift": new_sh, "elbow_flex": new_elbow}
     elif direction == "left":
