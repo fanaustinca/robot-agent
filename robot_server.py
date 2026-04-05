@@ -305,6 +305,7 @@ def get_joint_positions():
 # ---- Named Poses ----
 PRESETS = {
     "home":    {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
+    "ready":   {"shoulder_pan": 0, "shoulder_lift": 40, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
     "default": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0},
     "rest":    {"shoulder_pan": -1.10, "shoulder_lift": -102.24, "elbow_flex": 96.57, "wrist_flex": 76.35, "wrist_roll": -86.02, "gripper": 1.20},
 }
@@ -540,6 +541,7 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
       <h2>Presets</h2>
       <div class="btn-row">
         <button class="btn btn-blue" onclick="preset('home')">Home</button>
+        <button class="btn btn-blue" onclick="preset('ready')">Ready</button>
         <button class="btn btn-blue" onclick="preset('default')">Default</button>
         <button class="btn btn-blue" onclick="preset('rest')">Rest</button>
       </div>
@@ -771,9 +773,7 @@ def move_direction():
             if k.replace(".pos", "") == joint:
                 return float(v)
         return 0.0
-    # Hardware space: shoulder_lift is inverted from agent space, elbow_flex is not.
-    # Forward in agent space = shoulder_lift - deg, elbow_flex - deg
-    # After inversion: hardware shoulder_lift + deg, hardware elbow_flex - deg
+    # Hardware space: forward = shoulder_lift increases, elbow_flex decreases.
     if direction == "forward":
         targets = {
             "shoulder_lift": cur("shoulder_lift") + degrees * FORWARD_SHOULDER_RATIO,

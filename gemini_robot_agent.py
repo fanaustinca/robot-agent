@@ -78,6 +78,15 @@ DEFAULT_POSITION = {
     "gripper": 0,
 }
 
+READY_POSITION = {
+    "shoulder_pan": 0,
+    "shoulder_lift": -40,
+    "elbow_flex": 0,
+    "wrist_flex": 0,
+    "wrist_roll": -90,
+    "gripper": 0,
+}
+
 # Drop position (agent space — shoulder_lift inverted from hardware 10.46)
 DROP_POSITION = {
     "shoulder_pan": -47.08,
@@ -562,6 +571,7 @@ def print_help():
     print(f"\n{C.BOLD}Commands:{C.RESET}")
     print(f"  {C.CYAN}/help{C.RESET}, {C.CYAN}/h{C.RESET}              — show this help")
     print(f"  {C.CYAN}/home{C.RESET}                — move to home position (slow)")
+    print(f"  {C.CYAN}/ready{C.RESET}               — move to ready position (home + shoulder down 40°)")
     print(f"  {C.CYAN}/default{C.RESET}             — move all joints to 0 (slow)")
     print(f"  {C.CYAN}/drop{C.RESET}                — move to drop position (slow)")
     print(f"  {C.CYAN}/torque-on{C.RESET}  [motor]  — enable torque  {C.DIM}(alias: /t-on){C.RESET}")
@@ -959,6 +969,16 @@ def run_agent():
                 _commanded.update(HOME_POSITION)
                 print(f"{C.GREEN}[home]{C.RESET} Done.")
                 push_chat("Moved to home position.", role="agent")
+
+            elif cmd in ("/ready",):
+                print(f"{C.BLUE}[ready]{C.RESET} Moving to ready position (slow)...")
+                hw_joints = hardware_to_agent(get_joints())
+                if hw_joints:
+                    _commanded.update(hw_joints)
+                move_joints_slow(READY_POSITION)
+                _commanded.update(READY_POSITION)
+                print(f"{C.GREEN}[ready]{C.RESET} Done.")
+                push_chat("Moved to ready position.", role="agent")
 
             elif cmd in ("/default",):
                 print(f"{C.BLUE}[default]{C.RESET} Moving to default position (slow)...")
