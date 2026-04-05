@@ -750,8 +750,8 @@ def move():
 # Direction movement ratios (must match gemini_robot_agent.py)
 FORWARD_SHOULDER_RATIO  = 1.0
 BACKWARD_SHOULDER_RATIO = 1.0
-ELBOW_FORWARD_RATIO     = 1.5
-ELBOW_BACKWARD_RATIO    = 1.3
+ELBOW_FORWARD_RATIO     = 2.2
+ELBOW_BACKWARD_RATIO    = 1.8
 
 @app.route("/move_direction", methods=["POST"])
 def move_direction():
