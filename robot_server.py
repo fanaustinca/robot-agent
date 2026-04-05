@@ -771,7 +771,8 @@ def move_direction():
             if k.replace(".pos", "") == joint:
                 return float(v)
         return 0.0
-    # Hardware: forward = shoulder increases, elbow decreases (extends)
+    # Hardware: forward = shoulder increases, elbow decreases
+    # Backward = shoulder decreases, elbow also decreases (extends to keep level)
     if direction == "forward":
         targets = {
             "shoulder_lift": cur("shoulder_lift") + degrees,
@@ -780,19 +781,26 @@ def move_direction():
     elif direction == "backward":
         targets = {
             "shoulder_lift": cur("shoulder_lift") - degrees,
-            "elbow_flex": cur("elbow_flex") + degrees * ELBOW_BACKWARD_RATIO,
+            "elbow_flex": cur("elbow_flex") - degrees * ELBOW_BACKWARD_RATIO,
         }
     elif direction == "left":
         targets = {"shoulder_pan": cur("shoulder_pan") - degrees}
     elif direction == "right":
         targets = {"shoulder_pan": cur("shoulder_pan") + degrees}
-    # Interpolate in 8 steps so shoulder and elbow move together
+    # Interpolate in 8 steps — elbow leads shoulder slightly to prevent floor dip
     start = {k: cur(k) for k in targets}
     steps = 8
     try:
         for s in range(1, steps + 1):
             t = s / steps
-            action = {f"{k}.pos": start[k] + (targets[k] - start[k]) * t for k in targets}
+            action = {}
+            for k in targets:
+                if k == "elbow_flex" and direction in ("forward", "backward"):
+                    # Elbow leads shoulder — reaches target faster to prevent floor dip
+                    t_elbow = min(1.0, t * 1.5)
+                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * t_elbow
+                else:
+                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * t
             with robot_lock:
                 robot.send_action(action)
             time.sleep(0.08)

@@ -299,14 +299,16 @@ def move_direction(direction, degrees):
         return _commanded.get(joint, 0)
 
     if direction == "forward":
+        # Shoulder down, elbow folds (negative in agent = fold/compensate)
         new_pos = {
             "shoulder_lift": cur("shoulder_lift") - degrees,
             "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_FORWARD_RATIO,
         }
     elif direction == "backward":
+        # Shoulder up, elbow extends (negative = unfold to keep gripper level)
         new_pos = {
             "shoulder_lift": cur("shoulder_lift") + degrees,
-            "elbow_flex":    cur("elbow_flex")    + degrees * ELBOW_BACKWARD_RATIO,
+            "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_BACKWARD_RATIO,
         }
     elif direction == "left":
         new_pos = {"shoulder_pan": cur("shoulder_pan") - degrees}
