@@ -136,10 +136,23 @@ Rules:
 - Use larger degrees when the dot is far from target, smaller when nearly there
 - If the target is not visible, make your best guess on which direction to move to find it"""
 
-FORWARD_SHOULDER_RATIO  = 1.0
-BACKWARD_SHOULDER_RATIO = 1.0
-ELBOW_FORWARD_RATIO     = 2.2
-ELBOW_BACKWARD_RATIO    = 1.8
+import math
+
+# ---- Arm Geometry (cm) ----
+ARM_SHOULDER_HEIGHT = 12.0   # shoulder pivot above ground
+ARM_LOWER_LENGTH    = 11.5   # shoulder pivot to elbow pivot
+ARM_UPPER_LENGTH    = 30.0   # elbow pivot to gripper
+ARM_GRIPPER_CLEARANCE = 1.5  # gripper height above ground
+
+def elbow_for_shoulder(shoulder_deg_hw):
+    """Calculate the elbow angle (hardware degrees) needed to keep the gripper
+    at ARM_GRIPPER_CLEARANCE cm above ground for a given shoulder angle.
+    shoulder_deg_hw: hardware shoulder_lift in degrees (0=vertical, positive=forward/down)."""
+    sh_rad = math.radians(shoulder_deg_hw)
+    elbow_y = ARM_SHOULDER_HEIGHT - ARM_LOWER_LENGTH * math.cos(sh_rad)
+    drop = elbow_y - ARM_GRIPPER_CLEARANCE
+    clamped = max(-1.0, min(1.0, drop / ARM_UPPER_LENGTH))
+    return math.degrees(math.asin(clamped))
 
 TOP_WRIST_ITERATIONS = 10  # number of iterations to include both cameras
 
@@ -286,6 +299,7 @@ def move_joints_slow(target_joints):
 
 def move_direction(direction, degrees):
     """Move the arm in a cardinal direction (forward/backward/left/right) by degrees.
+    Forward/backward uses trig to keep the gripper level at ARM_GRIPPER_CLEARANCE.
     Syncs from hardware first, then applies relative move with slow interpolation.
     Returns True on success."""
     hw = get_joints_agent()
@@ -296,15 +310,18 @@ def move_direction(direction, degrees):
         return _commanded.get(joint, 0)
 
     if direction == "forward":
-        new_pos = {
-            "shoulder_lift": cur("shoulder_lift") - degrees * FORWARD_SHOULDER_RATIO,
-            "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_FORWARD_RATIO,
-        }
+        # Agent space: shoulder_lift negative = down/forward
+        new_sh = cur("shoulder_lift") - degrees
+        # Convert to hardware to compute elbow, then back to agent
+        new_sh_hw = -new_sh
+        new_elbow_hw = elbow_for_shoulder(new_sh_hw)
+        # Elbow is not inverted between agent/hardware
+        new_pos = {"shoulder_lift": new_sh, "elbow_flex": new_elbow_hw}
     elif direction == "backward":
-        new_pos = {
-            "shoulder_lift": cur("shoulder_lift") + degrees * BACKWARD_SHOULDER_RATIO,
-            "elbow_flex":    cur("elbow_flex")    + degrees * ELBOW_BACKWARD_RATIO,
-        }
+        new_sh = cur("shoulder_lift") + degrees
+        new_sh_hw = -new_sh
+        new_elbow_hw = elbow_for_shoulder(new_sh_hw)
+        new_pos = {"shoulder_lift": new_sh, "elbow_flex": new_elbow_hw}
     elif direction == "left":
         new_pos = {"shoulder_pan": cur("shoulder_pan") - degrees}
     elif direction == "right":
