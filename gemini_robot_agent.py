@@ -140,8 +140,8 @@ Rules:
 # Ratio of elbow movement per degree of shoulder movement.
 # Forward: elbow folds more to keep gripper from hitting ground.
 # Backward: elbow extends less aggressively.
-ELBOW_FORWARD_RATIO  = 2.4
-ELBOW_BACKWARD_RATIO = 0.3
+ELBOW_FORWARD_RATIO  = 2.1
+ELBOW_BACKWARD_RATIO = 0.1
 
 TOP_WRIST_ITERATIONS = 10  # number of iterations to include both cameras
 
