@@ -299,25 +299,36 @@ def move_direction(direction, degrees):
         return _commanded.get(joint, 0)
 
     if direction == "forward":
-        # Shoulder down, elbow folds (negative in agent = fold/compensate)
-        new_pos = {
-            "shoulder_lift": cur("shoulder_lift") - degrees,
-            "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_FORWARD_RATIO,
-        }
+        target_sh = cur("shoulder_lift") - degrees
+        target_el = cur("elbow_flex") - degrees * ELBOW_FORWARD_RATIO
     elif direction == "backward":
-        # Shoulder up, elbow folds slightly to keep gripper level
-        new_pos = {
-            "shoulder_lift": cur("shoulder_lift") + degrees,
-            "elbow_flex":    cur("elbow_flex")    + degrees * ELBOW_BACKWARD_RATIO,
-        }
+        target_sh = cur("shoulder_lift") + degrees
+        target_el = cur("elbow_flex") + degrees * ELBOW_BACKWARD_RATIO
     elif direction == "left":
-        new_pos = {"shoulder_pan": cur("shoulder_pan") - degrees}
+        move_joints_slow({"shoulder_pan": cur("shoulder_pan") - degrees})
+        return True
     elif direction == "right":
-        new_pos = {"shoulder_pan": cur("shoulder_pan") + degrees}
+        move_joints_slow({"shoulder_pan": cur("shoulder_pan") + degrees})
+        return True
     else:
         return False
 
-    move_joints_slow(new_pos)
+    # Interpolate: elbow leads on forward, shoulder leads on backward
+    start_sh = cur("shoulder_lift")
+    start_el = cur("elbow_flex")
+    for step in range(1, SLOW_MOVE_STEPS + 1):
+        t = step / SLOW_MOVE_STEPS
+        if direction == "forward":
+            t_el = min(1.0, t * 1.5)  # elbow leads
+            t_sh = t
+        else:
+            t_sh = min(1.0, t * 1.5)  # shoulder leads
+            t_el = t
+        move_joints({
+            "shoulder_lift": start_sh + (target_sh - start_sh) * t_sh,
+            "elbow_flex":    start_el + (target_el - start_el) * t_el,
+        })
+        time.sleep(SLOW_MOVE_DELAY)
     return True
 
 

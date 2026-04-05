@@ -795,10 +795,12 @@ def move_direction():
             t = s / steps
             action = {}
             for k in targets:
-                if k == "elbow_flex" and direction in ("forward", "backward"):
-                    # Elbow leads shoulder — reaches target faster to prevent floor dip
-                    t_elbow = min(1.0, t * 1.5)
-                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * t_elbow
+                if direction == "forward" and k == "elbow_flex":
+                    # Elbow leads shoulder on forward
+                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * min(1.0, t * 1.5)
+                elif direction == "backward" and k == "shoulder_lift":
+                    # Shoulder leads elbow on backward
+                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * min(1.0, t * 1.5)
                 else:
                     action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * t
             with robot_lock:
