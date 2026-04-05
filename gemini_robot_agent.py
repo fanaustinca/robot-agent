@@ -149,7 +149,7 @@ def elbow_for_shoulder(shoulder_deg_hw):
     at ARM_GRIPPER_CLEARANCE cm above ground for a given shoulder angle.
     shoulder_deg_hw: hardware shoulder_lift in degrees (0=vertical, positive=forward/down)."""
     sh_rad = math.radians(shoulder_deg_hw)
-    elbow_y = ARM_SHOULDER_HEIGHT - ARM_LOWER_LENGTH * math.cos(sh_rad)
+    elbow_y = ARM_SHOULDER_HEIGHT + ARM_LOWER_LENGTH * math.cos(sh_rad)
     drop = elbow_y - ARM_GRIPPER_CLEARANCE
     clamped = max(-1.0, min(1.0, drop / ARM_UPPER_LENGTH))
     return math.degrees(math.asin(clamped))
