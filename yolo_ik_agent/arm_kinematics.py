@@ -1,208 +1,154 @@
 """
 SO-101 arm kinematics using IKPy.
-Defines the kinematic chain and provides forward/inverse kinematics.
+Chain built from the official SO-101 URDF with corrected joint ordering.
 """
 
+import os
 import numpy as np
+import xml.etree.ElementTree as ET
 from ikpy.chain import Chain
 from ikpy.link import URDFLink
-from config import ARM_BASE_HEIGHT, ARM_LOWER_LENGTH, ARM_UPPER_LENGTH, ARM_GRIPPER_LENGTH, C
+from config import C
+
+
+URDF_PATH = os.path.join(os.path.dirname(__file__), "so101.urdf")
+
+
+def _parse_origin(joint_elem):
+    """Parse origin xyz and rpy from a URDF joint element."""
+    origin = joint_elem.find("origin")
+    if origin is None:
+        return [0, 0, 0], [0, 0, 0]
+    xyz = [float(x) for x in origin.get("xyz", "0 0 0").split()]
+    rpy = [float(x) for x in origin.get("rpy", "0 0 0").split()]
+    return xyz, rpy
 
 
 def build_chain():
-    """Build the IKPy kinematic chain for the SO-101 arm.
-    Joint order: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
-    Returns an ikpy.chain.Chain."""
+    """Build IKPy chain from the SO-101 URDF, handling reversed joint order."""
+    tree = ET.parse(URDF_PATH)
+    root = tree.getroot()
 
-    chain = Chain(name="so101", links=[
-        # Base: fixed link from ground to shoulder pivot
-        URDFLink(
-            name="base",
-            origin_translation=[0, 0, ARM_BASE_HEIGHT],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 0, 0],  # fixed
-        ),
-        # Joint 1: Shoulder pan (rotation around vertical Z axis)
-        URDFLink(
-            name="shoulder_pan",
-            origin_translation=[0, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 0, 1],  # rotates around Z
-            bounds=(np.radians(-150), np.radians(150)),
-        ),
-        # Joint 2: Shoulder lift (rotation around Y axis — forward/back tilt)
-        URDFLink(
-            name="shoulder_lift",
-            origin_translation=[0, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 1, 0],  # rotates around Y
-            bounds=(np.radians(-110), np.radians(110)),
-        ),
-        # Link: lower arm (shoulder to elbow)
-        URDFLink(
-            name="lower_arm",
-            origin_translation=[ARM_LOWER_LENGTH, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 0, 0],  # fixed
-        ),
-        # Joint 3: Elbow flex (rotation around Y axis)
-        URDFLink(
-            name="elbow_flex",
-            origin_translation=[0, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 1, 0],
-            bounds=(np.radians(-110), np.radians(110)),
-        ),
-        # Link: upper arm (elbow to wrist)
-        URDFLink(
-            name="upper_arm",
-            origin_translation=[ARM_UPPER_LENGTH, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 0, 0],  # fixed
-        ),
-        # Joint 4: Wrist flex
-        URDFLink(
-            name="wrist_flex",
-            origin_translation=[0, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 1, 0],
-            bounds=(np.radians(-110), np.radians(110)),
-        ),
-        # Joint 5: Wrist roll
-        URDFLink(
-            name="wrist_roll",
-            origin_translation=[0, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[1, 0, 0],  # rotates around X (roll)
-            bounds=(np.radians(-150), np.radians(150)),
-        ),
-        # Gripper tip (fixed offset)
-        URDFLink(
-            name="gripper_tip",
-            origin_translation=[ARM_GRIPPER_LENGTH, 0, 0],
-            origin_orientation=[0, 0, 0],
-            rotation=[0, 0, 0],  # fixed
-        ),
-    ])
-    return chain
+    # Parse all joints into a dict by name
+    joints = {}
+    for j in root.findall("joint"):
+        name = j.get("name")
+        jtype = j.get("type")
+        parent = j.find("parent").get("link")
+        child = j.find("child").get("link")
+        xyz, rpy = _parse_origin(j)
+        axis_elem = j.find("axis")
+        axis = [float(x) for x in axis_elem.get("xyz", "0 0 1").split()] if axis_elem is not None else [0, 0, 1]
+        limits = j.find("limit")
+        lower = float(limits.get("lower", "-3.14")) if limits is not None else -3.14
+        upper = float(limits.get("upper", "3.14")) if limits is not None else 3.14
+        joints[name] = {
+            "type": jtype, "parent": parent, "child": child,
+            "xyz": xyz, "rpy": rpy, "axis": axis,
+            "lower": lower, "upper": upper,
+        }
+
+    # Build chain in order: joint 1 → 2 → 3 → 4 → 5 (skip 6 = gripper jaw)
+    # Joint 1: base → shoulder (shoulder pan)
+    # Joint 2: shoulder → upper_arm (shoulder lift)
+    # Joint 3: upper_arm → lower_arm (elbow)
+    # Joint 4: lower_arm → wrist (wrist flex)
+    # Joint 5: wrist → gripper (wrist roll)
+    joint_order = ["1", "2", "3", "4", "5"]
+
+    links = [
+        URDFLink(name="base_link", origin_translation=[0, 0, 0],
+                 origin_orientation=[0, 0, 0], rotation=[0, 0, 0]),
+    ]
+
+    joint_names = []
+    for jname in joint_order:
+        j = joints[jname]
+        is_revolute = j["type"] == "revolute"
+        links.append(URDFLink(
+            name=jname,
+            origin_translation=j["xyz"],
+            origin_orientation=j["rpy"],
+            rotation=j["axis"] if is_revolute else [0, 0, 0],
+            bounds=(j["lower"], j["upper"]) if is_revolute else None,
+        ))
+        joint_names.append(jname)
+
+    # Add gripper tip offset (from joint 5 to gripper center)
+    j5 = joints.get("5", {})
+    links.append(URDFLink(
+        name="gripper_tip",
+        origin_translation=[0.02, 0, 0],
+        origin_orientation=[0, 0, 0],
+        rotation=[0, 0, 0],
+    ))
+
+    chain = Chain(name="so101", links=links,
+                  active_links_mask=[False] + [True]*len(joint_order) + [False])
+    return chain, joint_names
 
 
-# Global chain instance
+# Cached chain
 _chain = None
+_joint_names = None
 
 def get_chain():
-    global _chain
+    global _chain, _joint_names
     if _chain is None:
-        _chain = build_chain()
-        print(f"{C.GREEN}[ik]{C.RESET} Kinematic chain built ({len(_chain.links)} links)")
+        _chain, _joint_names = build_chain()
+        print(f"{C.GREEN}[ik]{C.RESET} Kinematic chain: {[l.name for l in _chain.links]}")
     return _chain
 
 
 def forward_kinematics(joint_angles_deg):
-    """Given joint angles in degrees (shoulder_pan, shoulder_lift, elbow_flex,
-    wrist_flex, wrist_roll), return the 3D position of the gripper tip.
-    Returns (x, y, z) in meters."""
+    """Given 5 joint angles in degrees [pan, lift, elbow, wrist_flex, wrist_roll],
+    return gripper tip position (x, y, z) in meters."""
     chain = get_chain()
-    # IKPy expects angles for ALL links including fixed ones (set to 0)
-    # Order: base(0), shoulder_pan, shoulder_lift, lower_arm(0), elbow_flex,
-    #        upper_arm(0), wrist_flex, wrist_roll, gripper_tip(0)
-    angles_rad = [0,  # base (fixed)
-                  np.radians(joint_angles_deg[0]),  # shoulder_pan
-                  np.radians(joint_angles_deg[1]),  # shoulder_lift
-                  0,  # lower_arm (fixed)
-                  np.radians(joint_angles_deg[2]),  # elbow_flex
-                  0,  # upper_arm (fixed)
-                  np.radians(joint_angles_deg[3]),  # wrist_flex
-                  np.radians(joint_angles_deg[4]),  # wrist_roll
-                  0]  # gripper_tip (fixed)
+    angles_rad = [0]  # base (fixed)
+    for a in joint_angles_deg:
+        angles_rad.append(np.radians(a))
+    angles_rad.append(0)  # gripper_tip (fixed)
     transform = chain.forward_kinematics(angles_rad)
-    pos = transform[:3, 3]
-    return pos
+    return transform[:3, 3]
 
 
 def inverse_kinematics(target_xyz, current_angles_deg=None):
-    """Given a target (x, y, z) in meters, compute joint angles in degrees.
-    Returns [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll].
-    current_angles_deg: optional hint for starting position (avoids weird solutions)."""
+    """Given target (x, y, z) in meters, return 5 joint angles in degrees."""
     chain = get_chain()
-
     target = np.array(target_xyz)
 
-    # Initial position hint
+    initial = None
     if current_angles_deg is not None:
-        initial = [0,
-                   np.radians(current_angles_deg[0]),
-                   np.radians(current_angles_deg[1]),
-                   0,
-                   np.radians(current_angles_deg[2]),
-                   0,
-                   np.radians(current_angles_deg[3]),
-                   np.radians(current_angles_deg[4]),
-                   0]
-    else:
-        initial = None
+        initial = [0] + [np.radians(a) for a in current_angles_deg] + [0]
 
-    # Solve IK
-    angles_rad = chain.inverse_kinematics(
-        target_position=target,
-        initial_position=initial,
-    )
+    angles_rad = chain.inverse_kinematics(target_position=target, initial_position=initial)
 
-    # Extract active joint angles and convert to degrees
-    result = [
-        np.degrees(angles_rad[1]),  # shoulder_pan
-        np.degrees(angles_rad[2]),  # shoulder_lift
-        np.degrees(angles_rad[4]),  # elbow_flex
-        np.degrees(angles_rad[6]),  # wrist_flex
-        np.degrees(angles_rad[7]),  # wrist_roll
-    ]
-    return result
+    # Extract active joint angles (indices 1-5)
+    return [np.degrees(angles_rad[i]) for i in range(1, 6)]
 
 
 def get_wrist_camera_pose(joint_angles_deg):
-    """Get the 3D position and rotation matrix of the wrist camera
-    given current joint angles. Used for triangulation.
-    Returns (position_3d, rotation_3x3)."""
+    """Get wrist camera 3D position and rotation from joint angles."""
     chain = get_chain()
-    angles_rad = [0,
-                  np.radians(joint_angles_deg[0]),
-                  np.radians(joint_angles_deg[1]),
-                  0,
-                  np.radians(joint_angles_deg[2]),
-                  0,
-                  np.radians(joint_angles_deg[3]),
-                  np.radians(joint_angles_deg[4]),
-                  0]
+    angles_rad = [0] + [np.radians(a) for a in joint_angles_deg] + [0]
     transform = chain.forward_kinematics(angles_rad)
-    position = transform[:3, 3]
-    rotation = transform[:3, :3]
-    return position, rotation
+    return transform[:3, 3], transform[:3, :3]
 
 
 if __name__ == "__main__":
-    # Quick test
-    print("Building SO-101 kinematic chain...")
+    print("Building SO-101 chain from URDF...")
     chain = get_chain()
-    print(f"Links: {[l.name for l in chain.links]}")
 
-    # Test forward kinematics at home position
-    home = [0, 0, 0, 0, -90]
+    home = [0, 0, 0, 0, 0]
     pos = forward_kinematics(home)
-    print(f"\nHome position FK: x={pos[0]*100:.1f}cm y={pos[1]*100:.1f}cm z={pos[2]*100:.1f}cm")
+    print(f"\nHome FK: x={pos[0]*100:.1f} y={pos[1]*100:.1f} z={pos[2]*100:.1f} cm")
 
-    # Test forward kinematics at ready position (shoulder_lift=40 in hardware = -40 agent)
-    ready = [0, -40, 0, 0, -90]
-    pos = forward_kinematics(ready)
-    print(f"Ready position FK: x={pos[0]*100:.1f}cm y={pos[1]*100:.1f}cm z={pos[2]*100:.1f}cm")
-
-    # Test inverse kinematics — pick a point in front of the arm
-    target = [0.20, 0, 0.015]  # 20cm forward, 1.5cm above table
-    print(f"\nIK target: x={target[0]*100:.1f}cm y={target[1]*100:.1f}cm z={target[2]*100:.1f}cm")
-    angles = inverse_kinematics(target)
-    print(f"IK solution: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}")
-
-    # Verify by running FK on the solution
-    verify = forward_kinematics(angles)
-    print(f"FK verify:   x={verify[0]*100:.1f}cm y={verify[1]*100:.1f}cm z={verify[2]*100:.1f}cm")
-    error = np.linalg.norm(np.array(target) - verify) * 100
-    print(f"Error: {error:.2f} cm")
+    # Test IK
+    for target in [[0.15, 0, 0.05], [0.10, 0.10, 0.02], [0.20, 0, 0.015]]:
+        print(f"\nIK target: x={target[0]*100:.0f} y={target[1]*100:.0f} z={target[2]*100:.0f} cm")
+        angles = inverse_kinematics(target)
+        print(f"  Angles: {[f'{a:.1f}' for a in angles]}")
+        verify = forward_kinematics(angles)
+        error = np.linalg.norm(np.array(target) - verify) * 100
+        print(f"  FK verify: x={verify[0]*100:.1f} y={verify[1]*100:.1f} z={verify[2]*100:.1f} cm")
+        print(f"  Error: {error:.2f} cm")

@@ -8,12 +8,11 @@ import os
 # ---- Server ----
 ROBOT_SERVER = os.environ.get("ROBOT_SERVER", "http://localhost:7878")
 
-# ---- Arm Geometry (meters for IKPy) ----
-# Measured from the SO-101 arm
-ARM_BASE_HEIGHT = 0.05      # shoulder pivot above table (5 cm)
-ARM_LOWER_LENGTH = 0.115    # shoulder pivot to elbow pivot (11.5 cm)
-ARM_UPPER_LENGTH = 0.30     # elbow pivot to wrist/gripper (30 cm)
-ARM_GRIPPER_LENGTH = 0.05   # wrist to gripper tip (estimated 5 cm)
+# ---- Arm Geometry (meters for IKPy, from official SO-101 URDF) ----
+ARM_BASE_HEIGHT = 0.054     # base to shoulder pivot (5.4 cm)
+ARM_UPPER_ARM = 0.113       # shoulder pivot to elbow (11.3 cm)
+ARM_LOWER_ARM = 0.135       # elbow to wrist (13.5 cm)
+ARM_WRIST_LENGTH = 0.064    # wrist to gripper tip (6.4 cm)
 
 # ---- Table ----
 TABLE_Z = 0.0               # table surface height (reference plane)
