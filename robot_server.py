@@ -755,12 +755,12 @@ ARM_UPPER_LENGTH    = 30.0
 ARM_GRIPPER_CLEARANCE = 1.5
 
 def elbow_for_shoulder(shoulder_deg_hw):
-    """Calculate elbow angle (hardware deg) to keep gripper at clearance height."""
+    """Calculate elbow angle (servo degrees, relative to lower arm) to keep gripper level."""
     sh_rad = math.radians(shoulder_deg_hw)
-    elbow_y = ARM_SHOULDER_HEIGHT + ARM_LOWER_LENGTH * math.cos(sh_rad)
-    drop = elbow_y - ARM_GRIPPER_CLEARANCE
-    clamped = max(-1.0, min(1.0, drop / ARM_UPPER_LENGTH))
-    return math.degrees(math.asin(clamped))
+    arg = (ARM_GRIPPER_CLEARANCE - ARM_SHOULDER_HEIGHT - ARM_LOWER_LENGTH * math.cos(sh_rad)) / ARM_UPPER_LENGTH
+    clamped = max(-1.0, min(1.0, arg))
+    total_angle = math.degrees(math.acos(clamped))
+    return total_angle - shoulder_deg_hw
 
 @app.route("/move_direction", methods=["POST"])
 def move_direction():

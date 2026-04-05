@@ -145,14 +145,17 @@ ARM_UPPER_LENGTH    = 30.0   # elbow pivot to gripper
 ARM_GRIPPER_CLEARANCE = 1.5  # gripper height above ground
 
 def elbow_for_shoulder(shoulder_deg_hw):
-    """Calculate the elbow angle (hardware degrees) needed to keep the gripper
-    at ARM_GRIPPER_CLEARANCE cm above ground for a given shoulder angle.
-    shoulder_deg_hw: hardware shoulder_lift in degrees (0=vertical, positive=forward/down)."""
+    """Calculate the elbow angle (hardware degrees, relative to lower arm) needed to keep
+    the gripper at ARM_GRIPPER_CLEARANCE cm above ground for a given shoulder angle.
+    shoulder_deg_hw: hardware shoulder_lift in degrees (0=vertical, positive=forward/down).
+    Returns elbow_flex in servo degrees."""
     sh_rad = math.radians(shoulder_deg_hw)
-    elbow_y = ARM_SHOULDER_HEIGHT + ARM_LOWER_LENGTH * math.cos(sh_rad)
-    drop = elbow_y - ARM_GRIPPER_CLEARANCE
-    clamped = max(-1.0, min(1.0, drop / ARM_UPPER_LENGTH))
-    return math.degrees(math.asin(clamped))
+    # gripper_y = H + L1*cos(θs) + L2*cos(θs + θe) = clearance
+    # Solve: cos(θs + θe) = (clearance - H - L1*cos(θs)) / L2
+    arg = (ARM_GRIPPER_CLEARANCE - ARM_SHOULDER_HEIGHT - ARM_LOWER_LENGTH * math.cos(sh_rad)) / ARM_UPPER_LENGTH
+    clamped = max(-1.0, min(1.0, arg))
+    total_angle = math.degrees(math.acos(clamped))  # absolute angle of upper arm from vertical
+    return total_angle - shoulder_deg_hw  # relative to lower arm = servo angle
 
 TOP_WRIST_ITERATIONS = 10  # number of iterations to include both cameras
 
