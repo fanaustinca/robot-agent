@@ -275,6 +275,38 @@ def move_joints_slow(target_joints):
         time.sleep(SLOW_MOVE_DELAY)
 
 
+def move_direction(direction, degrees):
+    """Move the arm in a cardinal direction (forward/backward/left/right) by degrees.
+    Syncs from hardware first, then applies relative move with slow interpolation.
+    Returns True on success."""
+    hw = get_joints_agent()
+    if hw:
+        _commanded.update(hw)
+
+    def cur(joint):
+        return _commanded.get(joint, 0)
+
+    if direction == "forward":
+        new_pos = {
+            "shoulder_lift": cur("shoulder_lift") - degrees * FORWARD_SHOULDER_RATIO,
+            "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_FORWARD_RATIO,
+        }
+    elif direction == "backward":
+        new_pos = {
+            "shoulder_lift": cur("shoulder_lift") + degrees * BACKWARD_SHOULDER_RATIO,
+            "elbow_flex":    cur("elbow_flex")    + degrees * ELBOW_BACKWARD_RATIO,
+        }
+    elif direction == "left":
+        new_pos = {"shoulder_pan": cur("shoulder_pan") - degrees}
+    elif direction == "right":
+        new_pos = {"shoulder_pan": cur("shoulder_pan") + degrees}
+    else:
+        return False
+
+    move_joints_slow(new_pos)
+    return True
+
+
 def get_joints():
     try:
         r = requests.get(f"{ROBOT_SERVER}/status", timeout=5)
@@ -534,6 +566,10 @@ def print_help():
     print(f"  {C.CYAN}/drop{C.RESET}                — move to drop position (slow)")
     print(f"  {C.CYAN}/torque-on{C.RESET}  [motor]  — enable torque  {C.DIM}(alias: /t-on){C.RESET}")
     print(f"  {C.CYAN}/torque-off{C.RESET} [motor]  — disable torque {C.DIM}(alias: /t-off){C.RESET}")
+    print(f"  {C.CYAN}/forward{C.RESET}  [deg]       — move gripper forward {C.DIM}(alias: /fwd, default 5°){C.RESET}")
+    print(f"  {C.CYAN}/backward{C.RESET} [deg]       — move gripper backward {C.DIM}(alias: /bwd){C.RESET}")
+    print(f"  {C.CYAN}/left{C.RESET}     [deg]       — move gripper left")
+    print(f"  {C.CYAN}/right{C.RESET}    [deg]       — move gripper right")
     print(f"  {C.CYAN}/move{C.RESET} <joint> <deg>  — move a single joint")
     print(f"  {C.CYAN}/pos{C.RESET}  [motor]        — show joint positions")
     print(f"  {C.CYAN}/cam{C.RESET}  [top|wrist]    — show camera info")
@@ -839,29 +875,12 @@ def visual_align(client, target_description):
         degrees = result.get("degrees", 5)
         degrees = min(max_delta, float(degrees))
 
-        def cur(joint):
-            return _commanded.get(joint, 0)
-
-        if direction == "forward":
-            new_pos = {
-                "shoulder_lift": cur("shoulder_lift") - degrees * FORWARD_SHOULDER_RATIO,
-                "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_FORWARD_RATIO,
-            }
-        elif direction == "backward":
-            new_pos = {
-                "shoulder_lift": cur("shoulder_lift") + degrees * BACKWARD_SHOULDER_RATIO,
-                "elbow_flex":    cur("elbow_flex")    + degrees * ELBOW_BACKWARD_RATIO,
-            }
-        elif direction == "left":
-            new_pos = {"shoulder_pan": cur("shoulder_pan") - degrees}
-        elif direction == "right":
-            new_pos = {"shoulder_pan": cur("shoulder_pan") + degrees}
-        else:
+        if direction not in ("forward", "backward", "left", "right"):
             print(f"[align] Unknown direction '{direction}', skipping")
             continue
 
         print(f"{C.BLUE}[align]{C.RESET} Moving {C.BOLD}{direction}{C.RESET} {degrees:.0f}°")
-        move_joints_slow(new_pos)
+        move_direction(direction, degrees)
         time.sleep(ALIGN_SETTLE_DELAY)
 
     print(f"{C.YELLOW}[align]{C.RESET} Max iterations reached")
@@ -1027,6 +1046,18 @@ def run_agent():
                         print(f"  Torque: {t_color}{'ON' if torque else 'OFF'}{C.RESET}")
                 except Exception as e:
                     print(f"{C.RED}[pos]{C.RESET} Error: {e}")
+
+            elif cmd in ("/forward", "/backward", "/left", "/right", "/fwd", "/bwd"):
+                direction = cmd.lstrip("/")
+                if direction == "fwd":
+                    direction = "forward"
+                elif direction == "bwd":
+                    direction = "backward"
+                deg = float(parts[1]) if len(parts) > 1 else 5.0
+                print(f"{C.BLUE}[move]{C.RESET} {direction} {deg:.0f}°...")
+                move_direction(direction, deg)
+                print(f"{C.GREEN}[move]{C.RESET} Done.")
+                push_chat(f"Moved {direction} {deg:.0f}°", role="agent")
 
             elif cmd == "/move":
                 if len(parts) != 3:

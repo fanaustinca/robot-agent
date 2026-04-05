@@ -545,6 +545,28 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
       </div>
     </div>
     <div class="card">
+      <h2>Direction Control</h2>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        <button class="btn btn-blue" style="width:80px" onclick="moveDir('forward')">Fwd</button>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-blue" style="width:80px" onclick="moveDir('left')">Left</button>
+          <button class="btn btn-blue" style="width:80px" onclick="moveDir('right')">Right</button>
+        </div>
+        <button class="btn btn-blue" style="width:80px" onclick="moveDir('backward')">Bwd</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:6px;border-top:1px solid #2a2a2a">
+        <span style="font-size:11px;color:#666;flex:1">Step:</span>
+        <select id="dir-step" style="background:#222;border:1px solid #444;border-radius:4px;color:#eee;font-size:11px;padding:2px 4px">
+          <option value="1">1&deg;</option>
+          <option value="3">3&deg;</option>
+          <option value="5" selected>5&deg;</option>
+          <option value="10">10&deg;</option>
+          <option value="15">15&deg;</option>
+          <option value="20">20&deg;</option>
+        </select>
+      </div>
+    </div>
+    <div class="card">
       <h2>Teleop</h2>
       <div id="teleop-bar" class="torque-status teleop-off">TELEOP OFF</div>
       <div class="btn-row" style="margin-top:8px">
@@ -563,6 +585,7 @@ const PHASE_LABELS={idle:'Idle',calibrating:'Calibrating',homing:'Homing',presca
 const JOINT_RANGES={shoulder_pan:[-150,150],shoulder_lift:[-110,110],elbow_flex:[-110,110],
   wrist_flex:[-110,110],wrist_roll:[-150,150],gripper:[0,100]};
 function post(url,body){fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
+function moveDir(dir){let deg=parseFloat(document.getElementById('dir-step').value)||5;post('/move_direction',{direction:dir,degrees:deg})}
 function torque(on){post('/enable',{enabled:on})}
 function grip(v){post('/move',{gripper:v})}
 function preset(p){post('/move_preset',{pose:p})}
@@ -721,6 +744,55 @@ def move():
         return jsonify({"ok": True, "sent": data})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Direction movement ratios (must match gemini_robot_agent.py)
+FORWARD_SHOULDER_RATIO  = 1.0
+BACKWARD_SHOULDER_RATIO = 1.0
+ELBOW_FORWARD_RATIO     = 1.5
+ELBOW_BACKWARD_RATIO    = 1.3
+
+@app.route("/move_direction", methods=["POST"])
+def move_direction():
+    """Move arm in a cardinal direction (forward/backward/left/right) by degrees."""
+    if robot is None:
+        return jsonify({"error": "Robot not connected"}), 503
+    data = request.json or {}
+    direction = data.get("direction", "").lower()
+    degrees = float(data.get("degrees", 5))
+    if direction not in ("forward", "backward", "left", "right"):
+        return jsonify({"error": f"Unknown direction '{direction}'. Use forward/backward/left/right"}), 400
+    # Read current positions
+    joints = get_joint_positions()
+    if not joints:
+        return jsonify({"error": "Cannot read joint positions"}), 503
+    # Get current values (clean key names)
+    def cur(joint):
+        for k, v in joints.items():
+            if k.replace(".pos", "") == joint:
+                return float(v)
+        return 0.0
+    if direction == "forward":
+        targets = {
+            "shoulder_lift": cur("shoulder_lift") + degrees * FORWARD_SHOULDER_RATIO,
+            "elbow_flex": cur("elbow_flex") + degrees * ELBOW_FORWARD_RATIO,
+        }
+    elif direction == "backward":
+        targets = {
+            "shoulder_lift": cur("shoulder_lift") - degrees * BACKWARD_SHOULDER_RATIO,
+            "elbow_flex": cur("elbow_flex") - degrees * ELBOW_BACKWARD_RATIO,
+        }
+    elif direction == "left":
+        targets = {"shoulder_pan": cur("shoulder_pan") - degrees}
+    elif direction == "right":
+        targets = {"shoulder_pan": cur("shoulder_pan") + degrees}
+    try:
+        action = {f"{k}.pos": float(v) for k, v in targets.items()}
+        with robot_lock:
+            robot.send_action(action)
+        return jsonify({"ok": True, "direction": direction, "degrees": degrees, "sent": targets})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/move_preset", methods=["POST"])
 def move_preset():
