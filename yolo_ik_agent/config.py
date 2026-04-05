@@ -37,7 +37,7 @@ WRIST_CALIB_FILE = os.path.join(CALIB_DIR, "wrist_camera.json")
 
 # ---- Checkerboard ----
 CHECKERBOARD_INNER_CORNERS = (7, 7)  # 8x8 squares = 7x7 inner corners
-CHECKERBOARD_SQUARE_SIZE = 0.025     # 2.5 cm per square (measure your printout)
+CHECKERBOARD_SQUARE_SIZE = 0.032     # 3.2 cm per square (measured from chess board)
 
 # ---- Top Camera Extrinsic (position relative to arm base) ----
 # Measure these from your setup — distance from arm base to directly below camera
