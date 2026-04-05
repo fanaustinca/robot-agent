@@ -364,6 +364,7 @@ def status():
         "torque_enabled": torque_enabled,
         "teleop_active": teleop_active,
         "teleop_fps": TELEOP_FPS,
+        "floor_drop": floor_drop,
         "agent": agent_state,
         "timestamp": time.time()
     })
@@ -814,7 +815,6 @@ function poll(){
 // Advanced panel
 let advOpen=false;
 let activityLog=[];
-let camFrameCount=0;let lastCamFpsTime=Date.now();let camFps=0;
 function toggleAdv(){advOpen=!advOpen;document.getElementById('adv-panel').className=advOpen?'adv-panel show':'adv-panel';
   document.getElementById('adv-arrow').innerHTML=advOpen?'&#9660;':'&#9654;';}
 function setCalib(){let v=parseFloat(document.getElementById('adv-calib-val').value);
@@ -840,8 +840,10 @@ function updateAdv(d){
   document.getElementById('adv-topcam').innerHTML=connBadge(topOk,topOk?(topInfo?topInfo.name+' #'+topInfo.index:'Connected'):'Disconnected');
   document.getElementById('adv-wristcam').innerHTML=connBadge(wristOk,wristOk?(wristInfo?wristInfo.name+' #'+wristInfo.index:'Connected'):'Disconnected');
   // Rates
-  document.getElementById('adv-teleop-fps').textContent=d.teleop_active?(d.teleop_fps||60)+'hz':'--';
-  document.getElementById('adv-cam-fps').textContent=camFps>0?camFps+'fps':'measuring...';
+  document.getElementById('adv-teleop-fps').textContent=d.teleop_active?(d.teleop_fps||60)+' hz':'--';
+  // Camera fps: estimate from history sample rate (joints update at camera rate)
+  let hLen=d.timestamp?Math.round(1/0.25)+'hz (poll)':'--';
+  document.getElementById('adv-cam-fps').textContent=d.cameras?d.cameras.length+' cams @ ~20fps':'--';
   // Activity log
   let a=d.agent||{};
   let detail=a.detail||'';
@@ -866,19 +868,13 @@ function updateAdv(d){
     }
     lc.innerHTML=h;
   }else{lsec.style.display='none';}
-  // Calibration
+  // Calibration — read from status data
   let ci=document.getElementById('adv-calib-val');
   if(document.activeElement!==ci){
-    fetch('/calibration').then(r=>r.json()).then(c=>{
-      if(c.floor_drop!==null&&c.floor_drop!==undefined)ci.value=c.floor_drop;
-      else ci.value='';
-    }).catch(()=>{});
+    if(d.floor_drop!==null&&d.floor_drop!==undefined)ci.value=d.floor_drop;
+    else ci.value='';
   }
 }
-// Measure camera fps from MJPEG stream
-let camImg=document.querySelector('.cam-box img');
-if(camImg){camImg.onload=function(){camFrameCount++;let now=Date.now();if(now-lastCamFpsTime>=2000){camFps=Math.round(camFrameCount/((now-lastCamFpsTime)/1000));camFrameCount=0;lastCamFpsTime=now;}};}
-
 poll();setInterval(poll,250);
 
 // ---- Chat ----

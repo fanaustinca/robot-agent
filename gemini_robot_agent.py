@@ -561,6 +561,11 @@ def calibrate_floor():
             floor_sl = actual_sl
             drop = SETUP_SHOULDER_LIFT - floor_sl
             _floor_drop = drop
+            # Push calibration to server so dashboard can see it
+            try:
+                requests.post(f"{ROBOT_SERVER}/calibration", json={"floor_drop": drop}, timeout=2)
+            except Exception:
+                pass
             print(f"{C.GREEN}{C.BOLD}[calib]{C.RESET} Floor detected!")
             print(f"  Setup position:  {SETUP_SHOULDER_LIFT}°")
             print(f"  Floor position:  {floor_sl:.1f}°")
