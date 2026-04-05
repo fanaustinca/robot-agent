@@ -83,12 +83,21 @@ history_lock = threading.Lock()
 def history_recorder():
     """Background thread: sample joint positions into rolling buffer."""
     while True:
-        joints = get_joint_positions()
-        if joints and "error" not in joints:
-            with history_lock:
-                joint_history.append({"t": time.time(), "joints": dict(joints)})
-                if len(joint_history) > HISTORY_MAX_SAMPLES:
-                    joint_history[:] = joint_history[-HISTORY_MAX_SAMPLES:]
+        # Use trylock to avoid blocking teleop — skip sample if bus is busy
+        if robot_lock.acquire(timeout=0.05):
+            try:
+                if robot is not None:
+                    obs = robot.get_observation()
+                    joints = {k: float(v) for k, v in obs.items() if "pos" in k or "joint" in k}
+                    if joints:
+                        with history_lock:
+                            joint_history.append({"t": time.time(), "joints": joints})
+                            if len(joint_history) > HISTORY_MAX_SAMPLES:
+                                joint_history[:] = joint_history[-HISTORY_MAX_SAMPLES:]
+            except Exception:
+                pass
+            finally:
+                robot_lock.release()
         time.sleep(HISTORY_INTERVAL)
 
 # ---- Agent Activity State (set by agent, read by dashboard) ----
@@ -1173,15 +1182,24 @@ def teleop_loop():
     """Background thread: read leader positions and send to follower at TELEOP_FPS."""
     global teleop_active
     interval = 1.0 / TELEOP_FPS
+    fail_count = 0
+    max_fails = 20  # only stop after 20 consecutive failures (~1 second)
     print(f"{C.GREEN}[teleop]{C.RESET} Loop started at {TELEOP_FPS} fps")
     while teleop_active:
         try:
             action = leader.get_action()
             with robot_lock:
                 robot.send_action(action)
+            fail_count = 0
         except Exception as e:
-            print(f"{C.RED}[teleop]{C.RESET} Error: {e}")
-            break
+            fail_count += 1
+            if fail_count >= max_fails:
+                print(f"{C.RED}[teleop]{C.RESET} {max_fails} consecutive errors, stopping: {e}")
+                break
+            elif fail_count == 1:
+                print(f"{C.YELLOW}[teleop]{C.RESET} Transient error (retrying): {e}")
+            time.sleep(0.05)
+            continue
         time.sleep(interval)
     teleop_active = False
     print(f"{C.YELLOW}[teleop]{C.RESET} Loop stopped")
