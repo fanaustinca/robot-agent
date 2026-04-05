@@ -771,15 +771,18 @@ def move_direction():
             if k.replace(".pos", "") == joint:
                 return float(v)
         return 0.0
+    # Hardware space: shoulder_lift is inverted from agent space, elbow_flex is not.
+    # Forward in agent space = shoulder_lift - deg, elbow_flex - deg
+    # After inversion: hardware shoulder_lift + deg, hardware elbow_flex - deg
     if direction == "forward":
         targets = {
             "shoulder_lift": cur("shoulder_lift") + degrees * FORWARD_SHOULDER_RATIO,
-            "elbow_flex": cur("elbow_flex") + degrees * ELBOW_FORWARD_RATIO,
+            "elbow_flex": cur("elbow_flex") - degrees * ELBOW_FORWARD_RATIO,
         }
     elif direction == "backward":
         targets = {
             "shoulder_lift": cur("shoulder_lift") - degrees * BACKWARD_SHOULDER_RATIO,
-            "elbow_flex": cur("elbow_flex") - degrees * ELBOW_BACKWARD_RATIO,
+            "elbow_flex": cur("elbow_flex") + degrees * ELBOW_BACKWARD_RATIO,
         }
     elif direction == "left":
         targets = {"shoulder_pan": cur("shoulder_pan") - degrees}
