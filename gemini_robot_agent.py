@@ -602,6 +602,8 @@ def print_help():
     print(f"  {C.CYAN}/drop{C.RESET}                — move to drop position (slow)")
     print(f"  {C.CYAN}/torque-on{C.RESET}  [motor]  — enable torque  {C.DIM}(alias: /t-on){C.RESET}")
     print(f"  {C.CYAN}/torque-off{C.RESET} [motor]  — disable torque {C.DIM}(alias: /t-off){C.RESET}")
+    print(f"  {C.CYAN}/gripper -on{C.RESET}          — open gripper   {C.DIM}(alias: /grip-on){C.RESET}")
+    print(f"  {C.CYAN}/gripper -off{C.RESET}         — close gripper  {C.DIM}(alias: /grip-off){C.RESET}")
     print(f"  {C.CYAN}/forward{C.RESET}  [deg]       — move gripper forward {C.DIM}(alias: /fwd, default 5°){C.RESET}")
     print(f"  {C.CYAN}/backward{C.RESET} [deg]       — move gripper backward {C.DIM}(alias: /bwd){C.RESET}")
     print(f"  {C.CYAN}/left{C.RESET}     [deg]       — move gripper left")
@@ -1079,6 +1081,29 @@ def run_agent():
                         print(f"{C.RED}[torque]{C.RESET} Error: {r.json()}")
                 except Exception as e:
                     print(f"{C.RED}[torque]{C.RESET} Error: {e}")
+
+            elif cmd in ("/gripper", "/grip-on", "/grip-off"):
+                # Determine open vs close
+                if cmd == "/grip-on" or (len(parts) > 1 and parts[1] == "-on"):
+                    grip_value = 100
+                    grip_label = "open"
+                elif cmd == "/grip-off" or (len(parts) > 1 and parts[1] == "-off"):
+                    grip_value = 0
+                    grip_label = "closed"
+                else:
+                    print(f"  {C.CYAN}/gripper -on{C.RESET}   — open gripper (100)  {C.DIM}(alias: /grip-on){C.RESET}")
+                    print(f"  {C.CYAN}/gripper -off{C.RESET}  — close gripper (0)   {C.DIM}(alias: /grip-off){C.RESET}")
+                    continue
+                try:
+                    r = requests.post(f"{ROBOT_SERVER}/move", json={"gripper": grip_value}, timeout=5)
+                    if r.json().get("ok"):
+                        _commanded["gripper"] = grip_value
+                        print(f"{C.GREEN}[gripper]{C.RESET} Gripper {grip_label} ({grip_value})")
+                        push_chat(f"Gripper {grip_label}.", role="agent")
+                    else:
+                        print(f"{C.RED}[gripper]{C.RESET} Error: {r.json()}")
+                except Exception as e:
+                    print(f"{C.RED}[gripper]{C.RESET} Error: {e}")
 
             elif cmd == "/pos":
                 motor_filter = resolve_joint(parts[1]) if len(parts) > 1 else None

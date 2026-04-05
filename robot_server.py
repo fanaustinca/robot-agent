@@ -308,6 +308,7 @@ PRESETS = {
     "ready":   {"shoulder_pan": 0, "shoulder_lift": 40, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
     "default": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0},
     "rest":    {"shoulder_pan": -1.10, "shoulder_lift": -102.24, "elbow_flex": 96.57, "wrist_flex": 76.35, "wrist_roll": -86.02, "gripper": 1.20},
+    "drop":    {"shoulder_pan": -47.08, "shoulder_lift": 10.46, "elbow_flex": -12.44, "wrist_flex": 86.20, "wrist_roll": -94.64, "gripper": 0},
 }
 
 # ---- Routes ----
@@ -315,14 +316,36 @@ PRESETS = {
 @app.route("/status")
 def status():
     joints = get_joint_positions()
+    # Leader arm joints (if connected)
+    leader_joints = None
+    if leader is not None:
+        try:
+            action = leader.get_action()
+            leader_joints = {k: float(v) for k, v in action.items()}
+        except Exception:
+            leader_joints = {"error": "read failed"}
+    # Robot port info
+    robot_port_info = None
+    if robot is not None and hasattr(robot, 'bus') and hasattr(robot.bus, 'port'):
+        robot_port_info = robot.bus.port
+    leader_port_info = None
+    if leader is not None and hasattr(leader, 'bus') and hasattr(leader.bus, 'port'):
+        leader_port_info = leader.bus.port
+    elif leader is not None and hasattr(leader, 'port'):
+        leader_port_info = leader.port
     return jsonify({
         "ok": True,
         "robot_connected": robot is not None,
+        "leader_connected": leader is not None,
+        "robot_port": robot_port_info,
+        "leader_port": leader_port_info,
         "cameras": list(cameras.keys()),
         "camera_info": camera_info,
         "joints": joints,
+        "leader_joints": leader_joints,
         "torque_enabled": torque_enabled,
         "teleop_active": teleop_active,
+        "teleop_fps": TELEOP_FPS,
         "agent": agent_state,
         "timestamp": time.time()
     })
@@ -483,6 +506,29 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
 .confirm-row{display:flex;gap:8px;margin-top:10px}
 .confirm-row .btn{padding:10px;font-size:14px;font-weight:600}
 #confirm-section{display:none}
+.adv-toggle{width:100%;padding:8px;border:1px solid #333;border-radius:8px;background:#1a1a1a;color:#888;
+            font-size:12px;cursor:pointer;text-align:left;margin-top:4px;transition:all .15s}
+.adv-toggle:hover{color:#eee;border-color:#555}
+.adv-panel{display:none;background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px;margin-top:4px}
+.adv-panel.show{display:block}
+.adv-section{margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #222}
+.adv-section:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none}
+.adv-section h3{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.adv-row{display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:2px 0}
+.adv-label{color:#888}.adv-val{color:#4fc3f7;font-family:'SF Mono',monospace}
+.adv-val.ok{color:#66bb6a}.adv-val.warn{color:#ffb74d}.adv-val.err{color:#ef5350}.adv-val.off{color:#757575}
+.conn-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase}
+.conn-badge.connected{background:#1b5e20;color:#66bb6a}
+.conn-badge.partial{background:#e65100;color:#ffb74d}
+.conn-badge.disconnected{background:#4e342e;color:#ff8a65}
+.conn-badge.connecting{background:#0d47a1;color:#64b5f6;animation:pulse 1.5s infinite}
+.adv-input{width:60px;padding:2px 4px;border:1px solid #444;border-radius:4px;background:#222;color:#4fc3f7;
+           font-size:11px;font-family:'SF Mono',monospace;text-align:right;outline:none}
+.adv-input:focus{border-color:#42a5f5}
+.adv-btn{padding:3px 8px;border:1px solid #444;border-radius:4px;background:#222;color:#eee;font-size:11px;cursor:pointer}
+.adv-btn:hover{background:#333}
+.adv-log{max-height:80px;overflow-y:auto;font-size:11px;color:#888;font-family:'SF Mono',monospace;
+         background:#151515;border-radius:4px;padding:6px;scrollbar-width:thin;scrollbar-color:#333 transparent}
 </style>
 </head><body>
 <h1>SO-101 Dashboard</h1>
@@ -545,6 +591,9 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
         <button class="btn btn-blue" onclick="preset('default')">Default</button>
         <button class="btn btn-blue" onclick="preset('rest')">Rest</button>
       </div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn btn-orange" onclick="preset('drop')">Drop</button>
+      </div>
     </div>
     <div class="card">
       <h2>Direction Control</h2>
@@ -574,6 +623,46 @@ h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
       <div class="btn-row" style="margin-top:8px">
         <button class="btn btn-green" onclick="teleopCtl('start')">Start</button>
         <button class="btn btn-red" onclick="teleopCtl('stop')">Stop</button>
+      </div>
+    </div>
+    <button class="adv-toggle" onclick="toggleAdv()"><span id="adv-arrow">&#9654;</span> Advanced</button>
+    <div class="adv-panel" id="adv-panel">
+      <div class="adv-section">
+        <h3>Connections</h3>
+        <div class="adv-row"><span class="adv-label">Follower Arm</span><span class="adv-val" id="adv-follower">--</span></div>
+        <div class="adv-row"><span class="adv-label">Follower Port</span><span class="adv-val off" id="adv-fport">--</span></div>
+        <div class="adv-row"><span class="adv-label">Leader Arm</span><span class="adv-val" id="adv-leader">--</span></div>
+        <div class="adv-row"><span class="adv-label">Leader Port</span><span class="adv-val off" id="adv-lport">--</span></div>
+        <div class="adv-row"><span class="adv-label">Top Camera</span><span class="adv-val" id="adv-topcam">--</span></div>
+        <div class="adv-row"><span class="adv-label">Wrist Camera</span><span class="adv-val" id="adv-wristcam">--</span></div>
+      </div>
+      <div class="adv-section">
+        <h3>Rates</h3>
+        <div class="adv-row"><span class="adv-label">Teleop FPS</span><span class="adv-val" id="adv-teleop-fps">--</span></div>
+        <div class="adv-row"><span class="adv-label">Camera FPS</span><span class="adv-val" id="adv-cam-fps">--</span></div>
+      </div>
+      <div class="adv-section">
+        <h3>Calibration</h3>
+        <div class="adv-row">
+          <span class="adv-label">Floor Drop</span>
+          <span style="display:flex;gap:4px;align-items:center">
+            <input class="adv-input" id="adv-calib-val" type="number" step="0.1" placeholder="--">
+            <span class="adv-label">&deg;</span>
+            <button class="adv-btn" onclick="setCalib()">Set</button>
+          </span>
+        </div>
+        <div class="btn-row" style="margin-top:6px">
+          <button class="btn btn-blue" style="font-size:11px;padding:4px" onclick="sendChat2('/calib')">Calibrate</button>
+          <button class="btn btn-red" style="font-size:11px;padding:4px" onclick="clearCalib()">Clear</button>
+        </div>
+      </div>
+      <div class="adv-section">
+        <h3>Agent Activity Log</h3>
+        <div class="adv-log" id="adv-log"></div>
+      </div>
+      <div class="adv-section" id="adv-leader-joints-section" style="display:none">
+        <h3>Leader Joints</h3>
+        <div id="adv-leader-joints"></div>
       </div>
     </div>
   </div>
@@ -674,11 +763,81 @@ function poll(){
     }else{prow.style.display='none'}
     // Confirm buttons
     document.getElementById('confirm-section').style.display=a.confirm_pending?'flex':'none';
+    // Advanced panel
+    updateAdv(d);
   }).catch(()=>{
     document.getElementById('dot').className='status-dot err';
     document.getElementById('conn-text').textContent='Disconnected';
   });
 }
+// Advanced panel
+let advOpen=false;
+let activityLog=[];
+let camFrameCount=0;let lastCamFpsTime=Date.now();let camFps=0;
+function toggleAdv(){advOpen=!advOpen;document.getElementById('adv-panel').className=advOpen?'adv-panel show':'adv-panel';
+  document.getElementById('adv-arrow').innerHTML=advOpen?'&#9660;':'&#9654;';}
+function setCalib(){let v=parseFloat(document.getElementById('adv-calib-val').value);
+  if(!isNaN(v))post('/calibration',{floor_drop:v});}
+function clearCalib(){post('/calibration',{floor_drop:null});document.getElementById('adv-calib-val').value='';}
+function sendChat2(text){fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})})}
+function connBadge(connected,label){
+  if(connected===true)return '<span class="conn-badge connected">'+label+'</span>';
+  if(connected==='partial')return '<span class="conn-badge partial">'+label+'</span>';
+  return '<span class="conn-badge disconnected">'+label+'</span>';
+}
+function updateAdv(d){
+  if(!advOpen)return;
+  // Connections
+  document.getElementById('adv-follower').innerHTML=connBadge(d.robot_connected,d.robot_connected?'Connected':'Disconnected');
+  document.getElementById('adv-fport').textContent=d.robot_port||'--';
+  document.getElementById('adv-leader').innerHTML=connBadge(d.leader_connected,d.leader_connected?'Connected':'Disconnected');
+  document.getElementById('adv-lport').textContent=d.leader_port||'--';
+  let topOk=d.cameras&&d.cameras.indexOf('top')>=0;
+  let wristOk=d.cameras&&d.cameras.indexOf('wrist')>=0;
+  let topInfo=d.camera_info&&d.camera_info.top;
+  let wristInfo=d.camera_info&&d.camera_info.wrist;
+  document.getElementById('adv-topcam').innerHTML=connBadge(topOk,topOk?(topInfo?topInfo.name+' #'+topInfo.index:'Connected'):'Disconnected');
+  document.getElementById('adv-wristcam').innerHTML=connBadge(wristOk,wristOk?(wristInfo?wristInfo.name+' #'+wristInfo.index:'Connected'):'Disconnected');
+  // Rates
+  document.getElementById('adv-teleop-fps').textContent=d.teleop_active?(d.teleop_fps||60)+'hz':'--';
+  document.getElementById('adv-cam-fps').textContent=camFps>0?camFps+'fps':'measuring...';
+  // Activity log
+  let a=d.agent||{};
+  let detail=a.detail||'';
+  if(detail&&(activityLog.length===0||activityLog[activityLog.length-1]!==detail)){
+    activityLog.push(detail);
+    if(activityLog.length>50)activityLog=activityLog.slice(-50);
+    let el=document.getElementById('adv-log');
+    el.textContent=activityLog.join('\\n');
+    el.scrollTop=el.scrollHeight;
+  }
+  // Leader joints
+  let lsec=document.getElementById('adv-leader-joints-section');
+  if(d.leader_joints&&!d.leader_joints.error){
+    lsec.style.display='block';
+    let lc=document.getElementById('adv-leader-joints');
+    let h='';
+    for(let k in d.leader_joints){
+      let name=k.replace('.pos','');
+      let v=d.leader_joints[k];
+      if(typeof v==='number')v=v.toFixed(1);
+      h+='<div class="adv-row"><span class="adv-label">'+name+'</span><span class="adv-val">'+v+'&deg;</span></div>';
+    }
+    lc.innerHTML=h;
+  }else{lsec.style.display='none';}
+  // Calibration
+  let ci=document.getElementById('adv-calib-val');
+  if(document.activeElement!==ci){
+    fetch('/calibration').then(r=>r.json()).then(c=>{
+      if(c.floor_drop!==null&&c.floor_drop!==undefined)ci.value=c.floor_drop;
+      else ci.value='';
+    }).catch(()=>{});
+  }
+}
+// Measure camera fps from MJPEG stream
+let camImg=document.querySelector('.cam-box img');
+if(camImg){camImg.onload=function(){camFrameCount++;let now=Date.now();if(now-lastCamFpsTime>=2000){camFps=Math.round(camFrameCount/((now-lastCamFpsTime)/1000));camFrameCount=0;lastCamFpsTime=now;}};}
+
 poll();setInterval(poll,250);
 
 // ---- Chat ----
@@ -978,6 +1137,27 @@ def teleop():
         return jsonify({"ok": ok, "message": msg, "teleop_active": teleop_active})
     else:
         return jsonify({"teleop_active": teleop_active})
+
+# ---- Calibration ----
+
+# Floor drop value — can be set by agent or dashboard
+floor_drop = None
+
+@app.route("/calibration", methods=["GET"])
+def get_calibration():
+    return jsonify({"floor_drop": floor_drop})
+
+@app.route("/calibration", methods=["POST"])
+def set_calibration():
+    global floor_drop
+    data = request.json or {}
+    if "floor_drop" in data:
+        val = data["floor_drop"]
+        floor_drop = float(val) if val is not None else None
+        print(f"{C.CYAN}[calib]{C.RESET} Floor drop set to {floor_drop}°" if floor_drop else f"{C.YELLOW}[calib]{C.RESET} Floor drop cleared")
+        return jsonify({"ok": True, "floor_drop": floor_drop})
+    return jsonify({"error": "Provide 'floor_drop'"}), 400
+
 
 # ---- Chat ----
 
