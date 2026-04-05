@@ -136,26 +136,12 @@ Rules:
 - Use larger degrees when the dot is far from target, smaller when nearly there
 - If the target is not visible, make your best guess on which direction to move to find it"""
 
-import math
-
-# ---- Arm Geometry (cm) ----
-ARM_SHOULDER_HEIGHT = 12.0   # shoulder pivot above ground
-ARM_LOWER_LENGTH    = 11.5   # shoulder pivot to elbow pivot
-ARM_UPPER_LENGTH    = 30.0   # elbow pivot to gripper
-ARM_GRIPPER_CLEARANCE = 1.5  # gripper height above ground
-
-def elbow_for_shoulder(shoulder_deg_hw):
-    """Calculate the elbow angle (hardware degrees, relative to lower arm) needed to keep
-    the gripper at ARM_GRIPPER_CLEARANCE cm above ground for a given shoulder angle.
-    shoulder_deg_hw: hardware shoulder_lift in degrees (0=vertical, positive=forward/down).
-    Returns elbow_flex in servo degrees."""
-    sh_rad = math.radians(shoulder_deg_hw)
-    # gripper_y = H + L1*cos(θs) + L2*cos(θs + θe) = clearance
-    # Solve: cos(θs + θe) = (clearance - H - L1*cos(θs)) / L2
-    arg = (ARM_GRIPPER_CLEARANCE - ARM_SHOULDER_HEIGHT - ARM_LOWER_LENGTH * math.cos(sh_rad)) / ARM_UPPER_LENGTH
-    clamped = max(-1.0, min(1.0, arg))
-    total_angle = math.degrees(math.acos(clamped))  # absolute angle of upper arm from vertical
-    return total_angle - shoulder_deg_hw  # relative to lower arm = servo angle
+# ---- Forward/Backward Elbow Compensation ----
+# Ratio of elbow movement per degree of shoulder movement.
+# Forward: elbow folds more to keep gripper from hitting ground.
+# Backward: elbow extends less aggressively.
+ELBOW_FORWARD_RATIO  = 1.5
+ELBOW_BACKWARD_RATIO = 1.0
 
 TOP_WRIST_ITERATIONS = 10  # number of iterations to include both cameras
 
@@ -312,16 +298,16 @@ def move_direction(direction, degrees):
     def cur(joint):
         return _commanded.get(joint, 0)
 
-    if direction in ("forward", "backward"):
-        # Agent space: negative shoulder_lift = down/forward
-        sign = -1 if direction == "forward" else 1
-        new_sh = cur("shoulder_lift") + sign * degrees
-        # Compute elbow DELTA using trig (negated: folding more when reaching forward)
-        cur_sh_hw = -cur("shoulder_lift")
-        new_sh_hw = -new_sh
-        elbow_delta = elbow_for_shoulder(cur_sh_hw) - elbow_for_shoulder(new_sh_hw)
-        new_elbow = cur("elbow_flex") + elbow_delta
-        new_pos = {"shoulder_lift": new_sh, "elbow_flex": new_elbow}
+    if direction == "forward":
+        new_pos = {
+            "shoulder_lift": cur("shoulder_lift") - degrees,
+            "elbow_flex":    cur("elbow_flex")    - degrees * ELBOW_FORWARD_RATIO,
+        }
+    elif direction == "backward":
+        new_pos = {
+            "shoulder_lift": cur("shoulder_lift") + degrees,
+            "elbow_flex":    cur("elbow_flex")    + degrees * ELBOW_BACKWARD_RATIO,
+        }
     elif direction == "left":
         new_pos = {"shoulder_pan": cur("shoulder_pan") - degrees}
     elif direction == "right":

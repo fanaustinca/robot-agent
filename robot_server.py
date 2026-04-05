@@ -747,20 +747,9 @@ def move():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ---- Arm Geometry (cm) ----
-import math
-ARM_SHOULDER_HEIGHT = 12.0
-ARM_LOWER_LENGTH    = 11.5
-ARM_UPPER_LENGTH    = 30.0
-ARM_GRIPPER_CLEARANCE = 1.5
-
-def elbow_for_shoulder(shoulder_deg_hw):
-    """Calculate elbow angle (servo degrees, relative to lower arm) to keep gripper level."""
-    sh_rad = math.radians(shoulder_deg_hw)
-    arg = (ARM_GRIPPER_CLEARANCE - ARM_SHOULDER_HEIGHT - ARM_LOWER_LENGTH * math.cos(sh_rad)) / ARM_UPPER_LENGTH
-    clamped = max(-1.0, min(1.0, arg))
-    total_angle = math.degrees(math.acos(clamped))
-    return total_angle - shoulder_deg_hw
+# ---- Forward/Backward Elbow Compensation (must match gemini_robot_agent.py) ----
+ELBOW_FORWARD_RATIO  = 1.5
+ELBOW_BACKWARD_RATIO = 1.0
 
 @app.route("/move_direction", methods=["POST"])
 def move_direction():
@@ -782,15 +771,17 @@ def move_direction():
             if k.replace(".pos", "") == joint:
                 return float(v)
         return 0.0
-    # Compute elbow DELTA from trig (negated: fold more when reaching forward)
+    # Hardware: forward = shoulder increases, elbow decreases (extends)
     if direction == "forward":
-        new_sh = cur("shoulder_lift") + degrees
-        elbow_delta = elbow_for_shoulder(cur("shoulder_lift")) - elbow_for_shoulder(new_sh)
-        targets = {"shoulder_lift": new_sh, "elbow_flex": cur("elbow_flex") + elbow_delta}
+        targets = {
+            "shoulder_lift": cur("shoulder_lift") + degrees,
+            "elbow_flex": cur("elbow_flex") - degrees * ELBOW_FORWARD_RATIO,
+        }
     elif direction == "backward":
-        new_sh = cur("shoulder_lift") - degrees
-        elbow_delta = elbow_for_shoulder(cur("shoulder_lift")) - elbow_for_shoulder(new_sh)
-        targets = {"shoulder_lift": new_sh, "elbow_flex": cur("elbow_flex") + elbow_delta}
+        targets = {
+            "shoulder_lift": cur("shoulder_lift") - degrees,
+            "elbow_flex": cur("elbow_flex") + degrees * ELBOW_BACKWARD_RATIO,
+        }
     elif direction == "left":
         targets = {"shoulder_pan": cur("shoulder_pan") - degrees}
     elif direction == "right":
@@ -801,14 +792,7 @@ def move_direction():
     try:
         for s in range(1, steps + 1):
             t = s / steps
-            # For forward/backward, compute elbow delta at each interpolated shoulder
-            if direction in ("forward", "backward"):
-                sh_interp = start["shoulder_lift"] + (targets["shoulder_lift"] - start["shoulder_lift"]) * t
-                el_delta = elbow_for_shoulder(start["shoulder_lift"]) - elbow_for_shoulder(sh_interp)
-                el_interp = start["elbow_flex"] + el_delta
-                action = {"shoulder_lift.pos": sh_interp, "elbow_flex.pos": el_interp}
-            else:
-                action = {f"{k}.pos": start[k] + (targets[k] - start[k]) * t for k in targets}
+            action = {f"{k}.pos": start[k] + (targets[k] - start[k]) * t for k in targets}
             with robot_lock:
                 robot.send_action(action)
             time.sleep(0.08)
