@@ -46,9 +46,27 @@ TOP_CAM_Y = 0.0             # camera roughly even forward/back with arm base
 TOP_CAM_Z = 0.55            # camera lens 55 cm above table
 TOP_CAM_PITCH = -45.0       # degrees below horizontal (-90 = straight down, -45 = angled)
 
+# ---- Wrist Camera Mount (relative to wrist roll joint) ----
+# Camera is mounted on the wrist roll link, centered left-right
+# Offset is in the wrist roll link's local frame (before roll rotation)
+WRIST_CAM_FORWARD = 0.045    # 4.5 cm forward of roll axis
+WRIST_CAM_UP = 0.06          # 6 cm above roll axis
+WRIST_CAM_RIGHT = 0.0        # centered
+WRIST_CAM_PITCH = -15.0      # 15 degrees down from horizontal (almost straight forward)
+
 # ---- URDF Base Offset ----
 # The URDF origin is offset from the physical arm base (from baseframe joint in URDF)
 URDF_BASE_OFFSET = (-0.163038, -0.168068, 0.0324817)
+
+# ---- URDF to Physical rotation ----
+# Physical: +X=right, +Y=forward, +Z=up
+# URDF: +X=forward, +Y=left, +Z=up (from FK analysis)
+import numpy as np
+URDF_TO_PHYS_ROT = np.array([
+    [0, -1, 0],   # physical right  = -URDF Y
+    [1,  0, 0],   # physical forward = +URDF X
+    [0,  0, 1],   # physical up      = +URDF Z
+], dtype=float)
 
 # ---- Terminal Colors ----
 class C:

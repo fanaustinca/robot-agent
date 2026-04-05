@@ -128,11 +128,55 @@ def inverse_kinematics(target_xyz, current_angles_deg=None):
 
 
 def get_wrist_camera_pose(joint_angles_deg):
-    """Get wrist camera 3D position and rotation from joint angles."""
+    """Get wrist camera position and rotation in PHYSICAL world frame.
+
+    The camera is mounted on the wrist roll link with a known offset.
+    Returns:
+        position: [right, forward, up] in meters (physical frame)
+        rotation: 3x3 matrix mapping camera-frame vectors to physical-world vectors
+                  (camera: +Z = optical axis, +X = right in image, +Y = down in image)
+    """
+    from config import (
+        WRIST_CAM_FORWARD, WRIST_CAM_UP, WRIST_CAM_RIGHT, WRIST_CAM_PITCH,
+        URDF_BASE_OFFSET, URDF_TO_PHYS_ROT,
+    )
+
     chain = get_chain()
     angles_rad = [0] + [np.radians(a) for a in joint_angles_deg] + [0]
     transform = chain.forward_kinematics(angles_rad)
-    return transform[:3, 3], transform[:3, :3]
+
+    urdf_pos = transform[:3, 3]  # gripper tip in URDF
+    urdf_rot = transform[:3, :3]  # orientation of end-effector in URDF
+
+    # Camera mount offset in the wrist link's local frame
+    cam_offset_local = np.array([WRIST_CAM_FORWARD, WRIST_CAM_RIGHT, WRIST_CAM_UP])
+    # Transform offset to URDF world frame and add to position
+    cam_pos_urdf = urdf_pos + urdf_rot @ cam_offset_local
+
+    # Convert position from URDF to physical frame
+    _URDF_BASE = np.array(URDF_BASE_OFFSET)
+    physical_pos = np.array([
+        -(cam_pos_urdf[1] - _URDF_BASE[1]),  # URDF -Y -> physical right
+        cam_pos_urdf[0] - _URDF_BASE[0],     # URDF +X -> physical forward
+        cam_pos_urdf[2] - _URDF_BASE[2],     # URDF +Z -> physical up
+    ])
+
+    # Convert rotation from URDF to physical frame
+    physical_rot_link = URDF_TO_PHYS_ROT @ urdf_rot
+
+    # Apply camera pitch (camera looks forward in link frame, tilted down)
+    p = np.radians(WRIST_CAM_PITCH)
+    sp, cp = np.sin(p), np.cos(p)
+    # Camera optical frame relative to link: cam +Z = link forward pitched down
+    # Same convention as top camera rotation builder
+    cam_from_link = np.array([
+        [1,   0,   0],
+        [0,  sp,  cp],
+        [0, -cp,  sp],
+    ])
+    physical_rot = physical_rot_link @ cam_from_link
+
+    return physical_pos, physical_rot
 
 
 if __name__ == "__main__":

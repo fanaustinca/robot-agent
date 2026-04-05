@@ -248,6 +248,16 @@ def triangulate_point(pixel1, pixel2, cam_matrix1, dist1, cam_matrix2, dist2,
     point_4d = cv2.triangulatePoints(P1, P2, pts1[0].T, pts2[0].T)
     point_3d = (point_4d[:3] / point_4d[3]).flatten()
 
+    # Reprojection error check
+    for name, pixel, P in [("top", pixel1, P1), ("wrist", pixel2, P2)]:
+        reproj = P @ np.append(point_3d, 1.0)
+        reproj = reproj[:2] / reproj[2]
+        err = np.linalg.norm(reproj - np.array(pixel))
+        if err > 50:
+            print(f"  [triangulate] WARNING: {name} reprojection error = {err:.1f} px")
+        else:
+            print(f"  [triangulate] {name} reprojection error = {err:.1f} px")
+
     return point_3d
 
 

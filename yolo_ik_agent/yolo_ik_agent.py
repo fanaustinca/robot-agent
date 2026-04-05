@@ -304,9 +304,15 @@ def detect_and_locate(target_label=None, use_triangulation=False):
         return point
     else:
         # Phase 2: Full triangulation with both cameras
-        wrist_matrix, wrist_dist, _ = load_calibration(WRIST_CALIB_FILE)
+        wrist_matrix, wrist_dist, wrist_calib_res = load_calibration(WRIST_CALIB_FILE)
         if wrist_matrix is None:
             print(f"{C.YELLOW}[detect]{C.RESET} Wrist camera not calibrated, falling back to table-plane")
+            return detect_and_locate(target_label, use_triangulation=False)
+
+        # Read joint angles BEFORE getting wrist frame (arm must be stationary)
+        current_angles = get_joint_angles()
+        if current_angles is None:
+            print(f"{C.YELLOW}[detect]{C.RESET} Cannot read joint angles, falling back to table-plane")
             return detect_and_locate(target_label, use_triangulation=False)
 
         frame_wrist = get_snapshot("wrist")
@@ -314,28 +320,47 @@ def detect_and_locate(target_label=None, use_triangulation=False):
             print(f"{C.YELLOW}[detect]{C.RESET} Cannot get wrist frame, falling back to table-plane")
             return detect_and_locate(target_label, use_triangulation=False)
 
+        # Scale wrist calibration if resolution differs
+        if wrist_calib_res is not None:
+            wh, ww = frame_wrist.shape[:2]
+            cw, ch = wrist_calib_res
+            if ww != cw or wh != ch:
+                sx, sy = ww / cw, wh / ch
+                wrist_matrix = wrist_matrix.copy()
+                wrist_matrix[0, 0] *= sx
+                wrist_matrix[0, 2] *= sx
+                wrist_matrix[1, 1] *= sy
+                wrist_matrix[1, 2] *= sy
+                print(f"{C.DIM}[detect] Scaled wrist calibration {cw}x{ch} → {ww}x{wh}{C.RESET}")
+
+        print(f"{C.BLUE}[detect]{C.RESET} Running detection on wrist camera...")
         detections_wrist = detect_objects(frame_wrist, target_label)
         if not detections_wrist:
             print(f"{C.YELLOW}[detect]{C.RESET} No objects in wrist camera, falling back to table-plane")
             return detect_and_locate(target_label, use_triangulation=False)
 
         pixel_wrist = detections_wrist[0]["center"]
-        print(f"{C.GREEN}[detect]{C.RESET} Wrist detection: {detections_wrist[0]['label']} at pixel ({pixel_wrist[0]:.0f}, {pixel_wrist[1]:.0f})")
+        print(f"{C.GREEN}[detect]{C.RESET} Wrist detection: {detections_wrist[0]['label']} ({detections_wrist[0]['confidence']:.0%}) at pixel ({pixel_wrist[0]:.0f}, {pixel_wrist[1]:.0f})")
 
-        # Get wrist camera pose from FK
-        current_angles = get_joint_angles()
-        if current_angles is None:
-            return detect_and_locate(target_label, use_triangulation=False)
-
+        # Get camera poses in physical world frame
         wrist_pos, wrist_rot = get_wrist_camera_pose(current_angles)
         cam_pos_top, cam_rot_top = get_top_camera_extrinsics()
+
+        print(f"{C.DIM}[detect] Top cam pos: right={cam_pos_top[0]*100:.1f} fwd={cam_pos_top[1]*100:.1f} up={cam_pos_top[2]*100:.1f}{C.RESET}")
+        print(f"{C.DIM}[detect] Wrist cam pos: right={wrist_pos[0]*100:.1f} fwd={wrist_pos[1]*100:.1f} up={wrist_pos[2]*100:.1f}{C.RESET}")
 
         point = triangulate_point(
             pixel_top, pixel_wrist,
             top_matrix, top_dist, wrist_matrix, wrist_dist,
             cam_pos_top, cam_rot_top, wrist_pos, wrist_rot
         )
-        print(f"{C.GREEN}[detect]{C.RESET} 3D position (triangulated): x={point[0]*100:.1f}cm y={point[1]*100:.1f}cm z={point[2]*100:.1f}cm")
+
+        # Sanity check: Z should be between table and camera height
+        if point[2] < -0.05 or point[2] > 0.5:
+            print(f"{C.YELLOW}[detect]{C.RESET} Triangulated Z={point[2]*100:.1f}cm looks wrong, falling back to table-plane")
+            return detect_and_locate(target_label, use_triangulation=False)
+
+        print(f"{C.GREEN}[detect]{C.RESET} 3D position (stereo): right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm")
         return point
 
 
@@ -473,7 +498,8 @@ def print_help():
     print(f"\n{C.BOLD}Commands:{C.RESET}")
     print(f"  {C.CYAN}pick up <object>{C.RESET}     — detect and pick up an object")
     print(f"  {C.CYAN}/detect [label]{C.RESET}       — run YOLO detection on top camera")
-    print(f"  {C.CYAN}/locate [label]{C.RESET}       — detect + compute 3D position")
+    print(f"  {C.CYAN}/locate [label]{C.RESET}       — detect + 3D position (table-plane)")
+    print(f"  {C.CYAN}/locate3d [label]{C.RESET}    — detect + 3D position (stereo triangulation)")
     print(f"  {C.CYAN}http://localhost:7878/stream{C.RESET} — YOLO debug viewer")
     print(f"  {C.CYAN}/ik <r> <f> <u>{C.RESET}      — move to position (right, fwd, up in cm)")
     print(f"  {C.CYAN}/fk{C.RESET}                   — show current gripper 3D position")
@@ -533,6 +559,12 @@ def run_agent():
                 pos = detect_and_locate(label)
                 if pos is not None:
                     print(f"  Position: right={pos[0]*100:.1f}cm fwd={pos[1]*100:.1f}cm up={pos[2]*100:.1f}cm")
+
+            elif cmd == "/locate3d":
+                label = " ".join(parts[1:]) if len(parts) > 1 else None
+                pos = detect_and_locate(label, use_triangulation=True)
+                if pos is not None:
+                    print(f"  Position (stereo): right={pos[0]*100:.1f}cm fwd={pos[1]*100:.1f}cm up={pos[2]*100:.1f}cm")
 
             elif cmd == "/ik":
                 if len(parts) != 4:
