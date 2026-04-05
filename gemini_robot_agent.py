@@ -141,7 +141,7 @@ Rules:
 # Forward: elbow folds more to keep gripper from hitting ground.
 # Backward: elbow extends less aggressively.
 ELBOW_FORWARD_RATIO  = 2.5
-ELBOW_BACKWARD_RATIO = 0.4
+ELBOW_BACKWARD_RATIO = 0.15
 
 TOP_WRIST_ITERATIONS = 10  # number of iterations to include both cameras
 

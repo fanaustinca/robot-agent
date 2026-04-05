@@ -749,7 +749,7 @@ def move():
 
 # ---- Forward/Backward Elbow Compensation (must match gemini_robot_agent.py) ----
 ELBOW_FORWARD_RATIO  = 2.5
-ELBOW_BACKWARD_RATIO = 0.4
+ELBOW_BACKWARD_RATIO = 0.15
 
 @app.route("/move_direction", methods=["POST"])
 def move_direction():
