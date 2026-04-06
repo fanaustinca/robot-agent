@@ -106,6 +106,7 @@ PRESETS = {
     "default": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0},
     "rest":    {"shoulder_pan": -1.10, "shoulder_lift": -102.24, "elbow_flex": 96.57, "wrist_flex": 76.35, "wrist_roll": -86.02, "gripper": 1.20},
     "drop":    {"shoulder_pan": -47.08, "shoulder_lift": 10.46, "elbow_flex": -12.44, "wrist_flex": 86.20, "wrist_roll": -94.64, "gripper": 0},
+    "observe": {"shoulder_pan": -21.5, "shoulder_lift": -42.2, "elbow_flex": -6.5, "wrist_flex": 96.1, "wrist_roll": -90, "gripper": 100},
 }
 
 
@@ -204,8 +205,8 @@ def move_to_xyz(target_xyz, current_angles=None):
     if error > 5.0:
         print(f"{C.YELLOW}[ik]{C.RESET} Warning: IK error is large ({error:.1f}cm) — solution may be inaccurate")
 
-    # Lock wrist flex at 45 degrees (gripper points down at 45°)
-    angles[3] = 45.0
+    # Lock wrist flex at 30 degrees (gripper angled down)
+    angles[3] = 30.0
     # Lock wrist roll at -90 degrees
     angles[4] = -90.0
 
@@ -355,63 +356,71 @@ def detect_and_locate(target_label=None, use_triangulation=False):
             cam_pos_top, cam_rot_top, wrist_pos, wrist_rot
         )
 
-        # Sanity check: Z should be between table and camera height
-        if point[2] < -0.05 or point[2] > 0.5:
-            print(f"{C.YELLOW}[detect]{C.RESET} Triangulated Z={point[2]*100:.1f}cm looks wrong, falling back to table-plane")
-            return detect_and_locate(target_label, use_triangulation=False)
-
+        # Use triangulated X/Y but clamp Z to table level
+        # (Z from stereo is unreliable until wrist extrinsics are perfectly calibrated)
+        print(f"{C.DIM}[detect] Raw triangulated: right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm{C.RESET}")
+        point[2] = GRIPPER_CLEARANCE
         print(f"{C.GREEN}[detect]{C.RESET} 3D position (stereo): right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm")
         return point
 
 
-def pickup_sequence(target_label):
-    """Full pickup sequence: detect → move → grip → verify → drop."""
+def pickup_sequence(target_label, use_stereo=False):
+    """Full pickup sequence. If use_stereo, uses both cameras for 3D triangulation."""
+    mode = "stereo 3D" if use_stereo else "table-plane"
     print(f"\n{C.BOLD}{'=' * 40}{C.RESET}")
-    print(f"{C.BOLD}Pickup: {C.CYAN}{target_label}{C.RESET}")
+    print(f"{C.BOLD}Pickup ({mode}): {C.CYAN}{target_label}{C.RESET}")
     print(f"{C.BOLD}{'=' * 40}{C.RESET}\n")
 
-    # Step 1: Move to home
-    print(f"{C.BLUE}[1/6]{C.RESET} Moving to home...")
-    move_preset("home")
-    time.sleep(1)
+    if use_stereo:
+        # Step 1: Move to observe position (wrist camera can see the workspace)
+        print(f"{C.BLUE}[1/8]{C.RESET} Moving to observe position...")
+        move_preset("observe")
+        time.sleep(1)
+    else:
+        print(f"{C.BLUE}[1/8]{C.RESET} Moving to home...")
+        move_preset("home")
+        time.sleep(1)
 
-    # Step 2: Open gripper
-    print(f"{C.BLUE}[2/6]{C.RESET} Opening gripper...")
+    # Step 2: Detect and locate
+    print(f"{C.BLUE}[2/8]{C.RESET} Detecting {target_label}...")
+    target_pos = detect_and_locate(target_label, use_triangulation=use_stereo)
+    if target_pos is None:
+        print(f"{C.RED}[pickup]{C.RESET} Cannot locate target — aborting")
+        move_preset("home")
+        return False
+
+    # Step 3: Move to home before approaching
+    print(f"{C.BLUE}[3/8]{C.RESET} Moving to home...")
+    move_preset("home")
+    time.sleep(0.5)
+
+    # Step 4: Open gripper
+    print(f"{C.BLUE}[4/8]{C.RESET} Opening gripper...")
     _send_joints({"gripper": 100})
     time.sleep(0.5)
 
-    # Step 3: Detect and locate
-    print(f"{C.BLUE}[3/6]{C.RESET} Detecting {target_label}...")
-    target_pos = detect_and_locate(target_label)
-    if target_pos is None:
-        print(f"{C.RED}[pickup]{C.RESET} Cannot locate target — aborting")
-        return False
-
-    # Step 4: Move to approach position (above the target)
-    print(f"{C.BLUE}[4/6]{C.RESET} Moving to approach position...")
-    approach = target_pos.copy()
-    approach[2] = GRIPPER_APPROACH_HEIGHT  # approach from above
-    result = move_to_xyz(approach)
-    if result is None:
-        print(f"{C.RED}[pickup]{C.RESET} Cannot reach approach position — aborting")
-        return False
-    time.sleep(1)
-
-    # Step 5: Lower to target
-    print(f"{C.BLUE}[5/6]{C.RESET} Lowering to target...")
+    # Step 5: Move to target position
+    print(f"{C.BLUE}[5/7]{C.RESET} Moving to target...")
     result = move_to_xyz(target_pos)
     if result is None:
         print(f"{C.RED}[pickup]{C.RESET} Cannot reach target — aborting")
         return False
-    time.sleep(0.5)
+    time.sleep(0.3)
+
+    # Lift shoulder 5 degrees to keep gripper off the floor
+    current = _get_current_joints_dict()
+    if current:
+        lift_val = current.get("shoulder_lift", 0) - 8
+        _interpolate_move({"shoulder_lift": lift_val}, steps=5, delay=0.04)
+    time.sleep(0.3)
 
     # Step 6: Close gripper
-    print(f"{C.BLUE}[6/6]{C.RESET} Closing gripper...")
+    print(f"{C.BLUE}[6/7]{C.RESET} Closing gripper...")
     _send_joints({"gripper": 0})
     time.sleep(1)
 
-    # Lift
-    print(f"{C.BLUE}[lift]{C.RESET} Lifting...")
+    # Step 7: Lift
+    print(f"{C.BLUE}[7/7]{C.RESET} Lifting...")
     lift_pos = target_pos.copy()
     lift_pos[2] = GRIPPER_APPROACH_HEIGHT
     move_to_xyz(lift_pos)
@@ -496,7 +505,8 @@ def startup_check():
 
 def print_help():
     print(f"\n{C.BOLD}Commands:{C.RESET}")
-    print(f"  {C.CYAN}pick up <object>{C.RESET}     — detect and pick up an object")
+    print(f"  {C.CYAN}pick up <object>{C.RESET}     — pick up using top camera (table-plane)")
+    print(f"  {C.CYAN}/pick3d <object>{C.RESET}    — pick up using stereo 3D (both cameras)")
     print(f"  {C.CYAN}/detect [label]{C.RESET}       — run YOLO detection on top camera")
     print(f"  {C.CYAN}/locate [label]{C.RESET}       — detect + 3D position (table-plane)")
     print(f"  {C.CYAN}/locate3d [label]{C.RESET}    — detect + 3D position (stereo triangulation)")
@@ -542,6 +552,13 @@ def run_agent():
 
             if cmd in ("/help", "/h"):
                 print_help()
+
+            elif cmd == "/pick3d":
+                label = " ".join(parts[1:]) if len(parts) > 1 else None
+                if label:
+                    pickup_sequence(label, use_stereo=True)
+                else:
+                    print(f"{C.YELLOW}Usage: /pick3d <object>{C.RESET}")
 
             elif cmd == "/detect":
                 label = " ".join(parts[1:]) if len(parts) > 1 else None
@@ -604,6 +621,10 @@ def run_agent():
 
             elif cmd in ("/home",):
                 move_preset("home")
+                print(f"  {C.GREEN}Done.{C.RESET}")
+
+            elif cmd in ("/observe",):
+                move_preset("observe")
                 print(f"  {C.GREEN}Done.{C.RESET}")
 
             elif cmd in ("/ready",):

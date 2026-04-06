@@ -148,10 +148,20 @@ def get_wrist_camera_pose(joint_angles_deg):
     urdf_pos = transform[:3, 3]  # gripper tip in URDF
     urdf_rot = transform[:3, :3]  # orientation of end-effector in URDF
 
+    # Undo the gripper_tip offset (2cm in local X) to get wrist roll joint position
+    # The camera is on the wrist roll link, NOT at the gripper tip
+    GRIPPER_TIP_OFFSET = np.array([0.02, 0, 0])
+    wrist_pos_urdf = urdf_pos - urdf_rot @ GRIPPER_TIP_OFFSET
+
     # Camera mount offset in the wrist link's local frame
-    cam_offset_local = np.array([WRIST_CAM_FORWARD, WRIST_CAM_RIGHT, WRIST_CAM_UP])
-    # Transform offset to URDF world frame and add to position
-    cam_pos_urdf = urdf_pos + urdf_rot @ cam_offset_local
+    # At home: local +X=right, +Y=up, -Z=forward (verified from FK)
+    cam_offset_local = np.array([
+        WRIST_CAM_RIGHT,     # local X = right
+        WRIST_CAM_UP,        # local Y = up
+        -WRIST_CAM_FORWARD,  # local -Z = forward
+    ])
+    # Transform offset to URDF world frame and add to wrist joint position
+    cam_pos_urdf = wrist_pos_urdf + urdf_rot @ cam_offset_local
 
     # Convert position from URDF to physical frame
     _URDF_BASE = np.array(URDF_BASE_OFFSET)
@@ -164,16 +174,18 @@ def get_wrist_camera_pose(joint_angles_deg):
     # Convert rotation from URDF to physical frame
     physical_rot_link = URDF_TO_PHYS_ROT @ urdf_rot
 
-    # Apply camera pitch (camera looks forward in link frame, tilted down)
+    # Camera optical frame in link's local frame
+    # Empirically calibrated: camera forward=-Y, camera up=-Z
+    # (the URDF joint rpy values twist the local frame)
+    rot_fwd = np.array([0, -1.0, 0])
+    rot_up = np.array([0, 0, -1.0])
+    rot_right = np.cross(rot_fwd, rot_up)
     p = np.radians(WRIST_CAM_PITCH)
     sp, cp = np.sin(p), np.cos(p)
-    # Camera optical frame relative to link: cam +Z = link forward pitched down
-    # Same convention as top camera rotation builder
-    cam_from_link = np.array([
-        [1,   0,   0],
-        [0,  sp,  cp],
-        [0, -cp,  sp],
-    ])
+    cam_z_local = cp * rot_fwd + (-sp) * rot_up  # optical axis
+    cam_x_local = rot_right                        # image right
+    cam_y_local = np.cross(cam_z_local, cam_x_local)  # image down
+    cam_from_link = np.column_stack([cam_x_local, cam_y_local, cam_z_local])
     physical_rot = physical_rot_link @ cam_from_link
 
     return physical_pos, physical_rot

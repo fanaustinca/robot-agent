@@ -272,7 +272,8 @@ def init_cameras():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_TOP_WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_TOP_HEIGHT)
                 cap.set(cv2.CAP_PROP_SHARPNESS, 7)
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)  # disable autofocus
+                cap.set(cv2.CAP_PROP_FOCUS, 40)     # fixed focus for table distance
             else:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_HEIGHT)
@@ -420,38 +421,6 @@ def mjpeg_generator(name):
         sw = SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH
         sh = SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT
         frame = cv2.resize(frame, (sw, sh))
-        # Draw crosshair + degree scale on wrist stream
-        if name == "wrist":
-            h, w = frame.shape[:2]
-            cx, cy = w // 2 + CROSSHAIR_OFFSET_X, h // 2 + CROSSHAIR_OFFSET_Y
-            # Crosshair dot
-            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1)
-            cv2.circle(frame, (cx, cy),  7, (0, 0, 0),       -1)
-            cv2.line(frame, (cx - 20, cy), (cx + 20, cy), (0, 0, 0), 2)
-            cv2.line(frame, (cx, cy - 20), (cx, cy + 20), (0, 0, 0), 2)
-            # Degree scale ruler (10° ≈ 80px, crosshair is 40px end-to-end)
-            px_per_deg = 8
-            ruler_y = h - 14
-            ruler_cx = w // 2
-            # Main ruler line
-            ruler_half = px_per_deg * 10  # 10° each side
-            cv2.line(frame, (ruler_cx - ruler_half, ruler_y), (ruler_cx + ruler_half, ruler_y), (200, 100, 255), 1)
-            # Tick marks: 1° small, 5° medium, 10° large
-            for deg in range(-10, 11):
-                x = ruler_cx + deg * px_per_deg
-                if deg % 10 == 0:
-                    tick_h, thickness = 8, 2
-                elif deg % 5 == 0:
-                    tick_h, thickness = 5, 1
-                else:
-                    tick_h, thickness = 3, 1
-                cv2.line(frame, (x, ruler_y - tick_h), (x, ruler_y), (200, 100, 255), thickness)
-            # Labels
-            cv2.putText(frame, "10", (ruler_cx - ruler_half - 4, ruler_y - 10), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
-            cv2.putText(frame, "5", (ruler_cx - px_per_deg * 5 - 3, ruler_y - 6), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
-            cv2.putText(frame, "0", (ruler_cx - 3, ruler_y - 10), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
-            cv2.putText(frame, "5", (ruler_cx + px_per_deg * 5 - 3, ruler_y - 6), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
-            cv2.putText(frame, "10", (ruler_cx + ruler_half - 4, ruler_y - 10), cv2.FONT_HERSHEY_PLAIN, 0.7, (200, 100, 255), 1)
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
         time.sleep(0.05)  # ~20 fps target (cameras deliver ~12-15fps max)
@@ -517,8 +486,9 @@ button.active{background:#0f0}
     <div class="roi-info" id="roi-info"></div>
   </div>
   <div class="cam">
-    <h2>Wrist Camera</h2>
-    <img id="img-wrist" src="/stream/wrist">
+    <h2>Wrist Camera <span id="wrist-mode">(live)</span></h2>
+    <img id="img-wrist-live" src="/stream/wrist">
+    <img id="img-wrist-detect" style="display:none">
   </div>
 </div>
 <div id="detections"><h2>Detections</h2><p>Enter a label and click Start Detecting.</p></div>
@@ -574,6 +544,9 @@ function toggleDetect(){
     document.getElementById('img-top-live').style.display='block';
     document.getElementById('img-top-detect').style.display='none';
     document.getElementById('top-mode').innerText='(live)';
+    document.getElementById('img-wrist-live').style.display='block';
+    document.getElementById('img-wrist-detect').style.display='none';
+    document.getElementById('wrist-mode').innerText='(live)';
     document.getElementById('status').innerText=''}
 }
 function runDetect(){
@@ -587,6 +560,12 @@ function runDetect(){
     var d=document.getElementById('img-top-detect');
     d.src='data:image/jpeg;base64,'+data.image;d.style.display='block';
     document.getElementById('top-mode').innerText='(YOLO)';
+    if(data.wrist_image){
+      document.getElementById('img-wrist-live').style.display='none';
+      var wd=document.getElementById('img-wrist-detect');
+      wd.src='data:image/jpeg;base64,'+data.wrist_image;wd.style.display='block';
+      document.getElementById('wrist-mode').innerText='(YOLO '+data.wrist_detections.length+')';
+    }
     var html='<h2>Detections</h2>';
     if(data.detections.length===0)html+='<p style="color:#ff0">No objects detected</p>';
     data.detections.forEach(function(det){
@@ -1237,7 +1216,23 @@ def yolo_detect():
     _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
     img_b64 = base64.b64encode(buf.tobytes()).decode()
 
-    return jsonify({"detections": dets, "image": img_b64, "position": position})
+    # Also run detection on wrist camera
+    wrist_b64 = None
+    wrist_dets = []
+    b64_wrist, werr = capture_snapshot("wrist")
+    if not werr:
+        wrist_bytes = base64.b64decode(b64_wrist)
+        wrist_array = np.frombuffer(wrist_bytes, dtype=np.uint8)
+        wrist_frame = cv2.imdecode(wrist_array, cv2.IMREAD_COLOR)
+        wrist_dets = detect_objects(wrist_frame, label)
+        wrist_annotated = annotate_frame(wrist_frame, wrist_dets)
+        _, wbuf = cv2.imencode(".jpg", wrist_annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        wrist_b64 = base64.b64encode(wbuf.tobytes()).decode()
+
+    return jsonify({
+        "detections": dets, "image": img_b64, "position": position,
+        "wrist_detections": wrist_dets, "wrist_image": wrist_b64,
+    })
 
 
 @app.route("/snapshot/<name>")
