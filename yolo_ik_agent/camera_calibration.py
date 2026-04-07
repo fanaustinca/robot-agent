@@ -178,8 +178,8 @@ def load_calibration(filepath):
 
 
 def pixel_to_table_ray(pixel_xy, camera_matrix, dist_coeffs,
-                        cam_position, cam_rotation):
-    """Project a 2D pixel coordinate into a 3D ray, then intersect with the table plane (Z=0).
+                        cam_position, cam_rotation, table_z=None):
+    """Project a 2D pixel coordinate into a 3D ray, then intersect with the table plane.
 
     Args:
         pixel_xy: (u, v) pixel coordinate
@@ -187,8 +187,9 @@ def pixel_to_table_ray(pixel_xy, camera_matrix, dist_coeffs,
         dist_coeffs: distortion coefficients
         cam_position: 3D position of camera in world frame
         cam_rotation: 3x3 rotation matrix of camera in world frame
+        table_z: Z height of the table plane (default: TABLE_Z from config)
 
-    Returns: (x, y, z) intersection with Z=0 plane, or None if ray doesn't hit table.
+    Returns: (x, y, z) intersection with table plane, or None if ray doesn't hit table.
     """
     # Undistort the pixel
     pts = np.array([[[pixel_xy[0], pixel_xy[1]]]], dtype=np.float64)
@@ -203,13 +204,16 @@ def pixel_to_table_ray(pixel_xy, camera_matrix, dist_coeffs,
     # Transform ray to world frame
     ray_world = cam_rotation @ ray_cam
 
-    # Intersect with Z=0 plane
-    # cam_position + t * ray_world = [x, y, 0]
-    # t = -cam_position[2] / ray_world[2]
+    # Intersect with table plane (Z = table_z)
+    if table_z is None:
+        from config import TABLE_Z
+        table_z = TABLE_Z
+    # cam_position + t * ray_world = [x, y, table_z]
+    # t = (table_z - cam_position[2]) / ray_world[2]
     if abs(ray_world[2]) < 1e-6:
         return None  # ray parallel to table
 
-    t = -cam_position[2] / ray_world[2]
+    t = (table_z - cam_position[2]) / ray_world[2]
     if t < 0:
         return None  # intersection behind camera
 

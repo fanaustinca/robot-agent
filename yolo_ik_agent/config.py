@@ -15,8 +15,8 @@ ARM_LOWER_ARM = 0.135       # elbow to wrist (13.5 cm)
 ARM_WRIST_LENGTH = 0.064    # wrist to gripper tip (6.4 cm)
 
 # ---- Table ----
-TABLE_Z = 0.0               # table surface height (reference plane)
-GRIPPER_CLEARANCE = 0.05    # gripper height above table for pickup (5 cm)
+TABLE_Z = -0.05              # table surface is 5cm below arm base
+GRIPPER_CLEARANCE = -0.03   # gripper target: 2cm above table = -3cm in arm frame
 GRIPPER_APPROACH_HEIGHT = 0.08  # approach height before lowering (8 cm)
 
 # ---- YOLO ----
@@ -43,15 +43,15 @@ CHECKERBOARD_SQUARE_SIZE = 0.032     # 3.2 cm per square (measured from chess bo
 # Physical world frame: +X = right, +Y = forward, +Z = up (relative to arm base on table)
 TOP_CAM_X = -0.21           # camera is 21 cm to the LEFT of the arm base
 TOP_CAM_Y = 0.0             # camera roughly even forward/back with arm base
-TOP_CAM_Z = 0.31            # camera lens 31 cm above table
+TOP_CAM_Z = 0.26            # camera lens 26 cm above arm base (31cm above table - 5cm base height)
 TOP_CAM_PITCH = -43.0       # degrees below horizontal (-90 = straight down)
 
 # ---- Wrist Camera Mount (relative to wrist roll joint) ----
 # Camera is mounted on the wrist roll link, centered left-right
 # Offset is in the wrist roll link's local frame (before roll rotation)
-WRIST_CAM_FORWARD = 0.045    # 4.5 cm forward of roll axis
-WRIST_CAM_UP = 0.06          # 6 cm above roll axis
-WRIST_CAM_RIGHT = 0.0        # centered
+WRIST_CAM_FORWARD = 0.006    # 0.6 cm forward of roll joint (in local -Z)
+WRIST_CAM_UP = 0.023         # 2.3 cm above roll joint (in local +Y)
+WRIST_CAM_RIGHT = -0.012     # 1.2 cm to the left (in local +X)
 WRIST_CAM_PITCH = -57.0      # pitch angle in link frame (empirically calibrated)
 
 # ---- URDF Base Offset ----

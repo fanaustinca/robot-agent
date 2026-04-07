@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.6; max-width: 800px; margin: 40px auto; color: #1a1a1a; }
+h1 { font-size: 22pt; color: #1a73e8; border-bottom: 3px solid #1a73e8; padding-bottom: 8px; }
+h2 { font-size: 16pt; color: #202124; margin-top: 32px; border-bottom: 1px solid #dadce0; padding-bottom: 4px; }
+h3 { font-size: 13pt; color: #5f6368; margin-top: 20px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th { background-color: #1a73e8; color: white; text-align: left; padding: 10px 12px; font-size: 10pt; }
+td { border: 1px solid #dadce0; padding: 8px 12px; font-size: 10pt; vertical-align: top; }
+tr:nth-child(even) { background-color: #f8f9fa; }
+code { background-color: #f1f3f4; padding: 2px 6px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 10pt; }
+pre { background-color: #f1f3f4; padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'Courier New', monospace; font-size: 10pt; line-height: 1.5; border-left: 4px solid #1a73e8; }
+.callout { background-color: #e8f0fe; border-left: 4px solid #1a73e8; padding: 12px 16px; margin: 16px 0; border-radius: 0 8px 8px 0; }
+.callout-warn { background-color: #fef7e0; border-left: 4px solid #f9ab00; padding: 12px 16px; margin: 16px 0; border-radius: 0 8px 8px 0; }
+.callout-done { background-color: #e6f4ea; border-left: 4px solid #34a853; padding: 12px 16px; margin: 16px 0; border-radius: 0 8px 8px 0; }
+.tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 9pt; font-weight: bold; margin-right: 4px; }
+.tag-done { background-color: #e6f4ea; color: #137333; }
+.tag-todo { background-color: #fef7e0; color: #b06000; }
+.tag-rejected { background-color: #fce8e6; color: #c5221f; }
+ul, ol { margin: 8px 0; }
+li { margin: 4px 0; }
+.diagram { background-color: #f8f9fa; padding: 16px; border: 1px solid #dadce0; border-radius: 8px; margin: 12px 0; font-family: 'Courier New', monospace; font-size: 10pt; white-space: pre; line-height: 1.4; }
+hr { border: none; border-top: 1px solid #dadce0; margin: 32px 0; }
+</style>
+</head>
+<body>
+
+<h1>SO-101 YOLO+IK Agent: Design Notes</h1>
+<p><strong>Date:</strong> April 5, 2026<br>
+<strong>Branch:</strong> <code>stereo-3d</code><br>
+<strong>Repo:</strong> <code>robot-agent-gemini-version</code></p>
+
+<p>Summary of design decisions for improving the YOLO+IK pickup agent. Covers detection accuracy, stereo 3D calibration, and hardware constraints.</p>
+
+<hr>
+
+<h2>1. Leader Arm Serial Number &nbsp;<span class="tag tag-done">DONE</span></h2>
+
+<p>Both follower and leader arms now use deterministic USB serial number lookup before falling back to auto-detection.</p>
+
+<table>
+<tr><th>Arm</th><th>Serial Number</th><th>Fallback</th></tr>
+<tr><td><strong>Follower</strong> (robot)</td><td><code>5AE6083982</code></td><td><code>ROBOT_PORT</code> env &rarr; first <code>ttyACM*</code></td></tr>
+<tr><td><strong>Leader</strong> (teleop)</td><td><code>5AE6084010</code></td><td><code>LEADER_PORT</code> env &rarr; second <code>ttyACM*</code></td></tr>
+</table>
+
+<div class="callout-done">
+<strong>Change:</strong> <code>robot_server.py</code> &mdash; added <code>LEADER_SERIAL</code> constant and serial lookup in <code>find_leader_port()</code> before the existing auto-detect-by-exclusion logic.
+</div>
+
+<hr>
+
+<h2>2. Object Detection: Gemini Verification &nbsp;<span class="tag tag-todo">TODO</span></h2>
+
+<h3>Current State</h3>
+
+<p><code>yolo_ik_agent/detect.py</code> uses <strong>GroundingDINO</strong> (open-vocabulary zero-shot detector, despite "YOLO" naming throughout the codebase). It takes a text prompt and finds matching objects.</p>
+
+<p>The text prompt comes from <strong>naive string parsing</strong> in <code>yolo_ik_agent.py</code>:</p>
+<ul>
+<li><strong>Verb detection:</strong> substring match against <code>["pick up", "pickup", "grab", "retrieve", "fetch", "collect"]</code></li>
+<li><strong>Noun extraction:</strong> everything after the keyword, with articles stripped</li>
+<li>Example: <code>"pick up the red lego brick"</code> &rarr; target label <code>"red lego brick"</code></li>
+</ul>
+
+<h3>Problems</h3>
+
+<table>
+<tr><th>Failure Mode</th><th>What Happens</th></tr>
+<tr><td>Wrong object has highest confidence</td><td>Arm picks it up silently &mdash; no verification</td></tr>
+<tr><td>Multiple similar objects</td><td>No way to distinguish ("the red one, not the blue one")</td></tr>
+<tr><td>Object not in frame</td><td>Picks whatever scores highest, or aborts with no retry</td></tr>
+<tr><td>Ambiguous/spatial references</td><td>GroundingDINO can't parse "the one on the left"</td></tr>
+</table>
+
+<h3>Solution: Gemini API as Post-Detection Verifier</h3>
+
+<div class="diagram">User: "pick up the red lego brick"
+  |
+  v
+String parsing: extracts "red lego brick"
+  |
+  v
+GroundingDINO: runs on camera frame
+  |  returns N candidate detections with bounding boxes
+  v
+Annotate frame with numbered bounding boxes
+  |
+  v
+Gemini API (gemini-3-flash-preview):
+  "Which numbered box contains a red lego brick?
+   Reply with the number, or 'none'."
+  |
+  v
+Use verified detection's center pixel for IK pipeline</div>
+
+<p><strong>What this solves:</strong></p>
+<ul>
+<li>Wrong-object picks &mdash; Gemini rejects incorrect detections</li>
+<li>Multiple similar objects &mdash; Gemini understands color, size, spatial references</li>
+<li>Nothing matches &mdash; Gemini returns "none", agent aborts gracefully</li>
+<li>Adds ~1&ndash;2s latency (negligible vs arm movement time)</li>
+</ul>
+
+<h3>Rejected Alternatives</h3>
+
+<table>
+<tr><th>Alternative</th><th>Why Rejected</th></tr>
+<tr><td><span class="tag tag-rejected">REJECTED</span> Gemini as pre-detection prompt refiner</td><td>Marginal improvement over GroundingDINO's native text understanding. Extra API call not worth it.</td></tr>
+<tr><td><span class="tag tag-rejected">REJECTED</span> Local Gemma 4 model</td><td>GPU too constrained. FP16 won't fit alongside GroundingDINO. INT4 would fit but Gemini API is simpler and more capable. See hardware section.</td></tr>
+</table>
+
+<hr>
+
+<h2>3. Stereo 3D: Preset-Based Observe Positions &nbsp;<span class="tag tag-todo">TODO</span></h2>
+
+<h3>Current State</h3>
+
+<p>Two methods exist for computing 3D object position:</p>
+
+<table>
+<tr><th>Method</th><th>Cameras</th><th>How It Works</th><th>Limitation</th></tr>
+<tr><td><strong>Table-plane</strong></td><td>Top only</td><td>Ray from pixel intersects Z=0 plane</td><td>Assumes object is flat on table. Fails for cups, stacked objects.</td></tr>
+<tr><td><strong>Stereo triangulation</strong></td><td>Top + Wrist</td><td>Two rays from two cameras intersect in 3D</td><td>Wrist extrinsics from FK are inaccurate. <strong>Z is currently discarded.</strong></td></tr>
+</table>
+
+<div class="callout-warn">
+<strong>Current workaround:</strong> In <code>yolo_ik_agent.py</code> line 362, triangulated Z is thrown away:<br>
+<code>point[2] = GRIPPER_CLEARANCE &nbsp;# Z from stereo is unreliable</code>
+</div>
+
+<h3>Why FK-Based Wrist Extrinsics Are Unreliable</h3>
+
+<ul>
+<li>URDF link lengths and offsets must be perfectly accurate</li>
+<li>Joint backlash and servo imprecision compound through the kinematic chain</li>
+<li>Camera mount offset on the wrist must be precisely modeled</li>
+<li>Small errors at each joint accumulate into large position errors at the camera</li>
+</ul>
+
+<h3>Solution: Pre-Allocated Observe Presets</h3>
+
+<p>Instead of computing wrist camera extrinsics dynamically from FK, define a small set of <strong>fixed arm positions</strong>. Each preset has its wrist camera extrinsics <strong>calibrated once</strong> using the existing checkerboard tool.</p>
+
+<div class="diagram">Top camera: object detected in zone "center-right"
+  |
+  v
+Lookup: zone "center-right" -> observe preset "right"
+  |
+  v
+Move arm to preset "right" (fixed joint angles)
+  |
+  v
+Wrist camera captures frame (extrinsics are pre-calibrated constants)
+  |
+  v
+Triangulate: top pixel + wrist pixel + known extrinsics
+  |
+  v
+Accurate 3D position (including height!) -> IK -> pickup</div>
+
+<h3>Preset Data Structure</h3>
+
+<pre>OBSERVE_PRESETS = {
+    "left":   {
+        "joints": {"shoulder_pan": 30, "shoulder_lift": -42, ...},
+        "cam_pos": [0.08, 0.19, 0.27],       # from calibration
+        "cam_rot": [[...], [...], [...]],      # from calibration
+    },
+    "center": {
+        "joints": {"shoulder_pan": 0, "shoulder_lift": -42, ...},
+        "cam_pos": [-0.02, 0.22, 0.28],
+        "cam_rot": [[...], [...], [...]],
+    },
+    "right":  {
+        "joints": {"shoulder_pan": -30, "shoulder_lift": -42, ...},
+        "cam_pos": [-0.12, 0.19, 0.27],
+        "cam_rot": [[...], [...], [...]],
+    },
+}</pre>
+
+<h3>Zone Mapping</h3>
+
+<p>Divide the top camera image into regions, each mapped to an observe preset:</p>
+
+<div class="diagram">Top camera view:
++----------+----------+----------+
+|          |          |          |
+|  zone_L  |  zone_C  |  zone_R  |
+|          |          |          |
++----------+----------+----------+
+|          |          |          |
+| zone_FL  | zone_FC  | zone_FR  |
+|          |          |          |
++----------+----------+----------+
+
+zone_C  -> observe_center  (pan = 0)
+zone_L  -> observe_left    (pan = 30)
+zone_R  -> observe_right   (pan = -30)
+...</div>
+
+<p>Number of presets depends on wrist camera FOV. <strong>Start with 3</strong> (left / center / right) and add more if coverage gaps appear.</p>
+
+<h3>Calibration Workflow (One-Time Per Preset)</h3>
+
+<ol>
+<li>Move arm to the preset joint angles</li>
+<li>Run <code>calibrate_extrinsic.py</code> (already written, uses checkerboard visible to both cameras)</li>
+<li>Save resulting <code>cam_pos</code> + <code>cam_rot</code> in a JSON file keyed by preset name</li>
+<li>Repeat for each preset</li>
+</ol>
+
+<h3>Edge Cases</h3>
+
+<table>
+<tr><th>Scenario</th><th>Handling</th></tr>
+<tr><td>Object at zone boundary</td><td>Overlap zones slightly; or try both presets and average</td></tr>
+<tr><td>Wrist camera can't detect object</td><td>Fall back to table-plane method (Z=0)</td></tr>
+<tr><td>Top camera blocked by arm</td><td>Won't happen &mdash; top detection runs before arm moves to observe</td></tr>
+</table>
+
+<hr>
+
+<h2>4. Hardware Constraints</h2>
+
+<table>
+<tr><th>Component</th><th>Spec</th></tr>
+<tr><td>CPU</td><td>Intel Core Ultra 9 275HX, 24 cores</td></tr>
+<tr><td>RAM</td><td>30 GB (22 GB available)</td></tr>
+<tr><td>GPU</td><td>NVIDIA RTX 5060 Laptop, <strong>8 GB VRAM</strong></td></tr>
+<tr><td>Disk</td><td>88 GB free</td></tr>
+</table>
+
+<h3>VRAM Budget at Runtime</h3>
+
+<table>
+<tr><th>Process</th><th>VRAM</th></tr>
+<tr><td>Xorg + Chrome</td><td>~725 MB</td></tr>
+<tr><td>GroundingDINO</td><td>~2,200 MB</td></tr>
+<tr><td><strong>Free</strong></td><td><strong>~5,100 MB</strong></td></tr>
+</table>
+
+<div class="callout-warn">
+<strong>Gemma 4 4B won't fit at FP16 (~5 GB) alongside GroundingDINO.</strong> INT4 quantized (~2.5 GB) would work but adds complexity. Decision: use Gemini API instead.
+</div>
+
+<hr>
+
+<h2>5. Implementation Checklist</h2>
+
+<table>
+<tr><th>File</th><th>Change</th><th>Priority</th></tr>
+<tr><td><code>yolo_ik_agent/detect.py</code></td><td>Add Gemini verification after GroundingDINO returns candidates. Send annotated image, parse response.</td><td>High</td></tr>
+<tr><td><code>yolo_ik_agent/yolo_ik_agent.py</code></td><td>Add zone mapping (pixel region &rarr; preset name). Move arm to observe preset before wrist capture. Use preset extrinsics for triangulation.</td><td>High</td></tr>
+<tr><td><code>yolo_ik_agent/config.py</code></td><td>Add observe preset definitions (joints + extrinsics). Add zone boundary constants.</td><td>High</td></tr>
+<tr><td><code>yolo_ik_agent/calibrate_extrinsic.py</code></td><td>Support saving calibration keyed by preset name (currently saves a single <code>wrist_extrinsic.json</code>).</td><td>Medium</td></tr>
+<tr><td><code>yolo_ik_agent/camera_calibration.py</code></td><td>No changes expected. <code>triangulate_point()</code> already accepts arbitrary extrinsics.</td><td>&mdash;</td></tr>
+<tr><td><code>robot_server.py</code></td><td>Leader serial number change (already done).</td><td><span class="tag tag-done">DONE</span></td></tr>
+</table>
+
+<hr>
+
+<h2>6. File Map</h2>
+
+<p>For someone new to the codebase:</p>
+
+<table>
+<tr><th>File</th><th>Lines</th><th>Role</th></tr>
+<tr><td><code>robot_server.py</code> (root)</td><td>~1,514</td><td>Flask server on :7878. Hardware bridge to SO-101 arm + 2 USB cameras. Web dashboard. All agents talk to it over HTTP.</td></tr>
+<tr><td><code>yolo_ik_agent/robot_server.py</code></td><td>~1,736</td><td>Modified copy of root server with YOLO debug streaming endpoints.</td></tr>
+<tr><td><code>yolo_ik_agent/yolo_ik_agent.py</code></td><td>~680</td><td>Main agent loop. String parsing, pickup sequence, IK movement, CLI commands.</td></tr>
+<tr><td><code>yolo_ik_agent/detect.py</code></td><td>~139</td><td>GroundingDINO wrapper. <code>detect_objects()</code> and <code>annotate_frame()</code>.</td></tr>
+<tr><td><code>yolo_ik_agent/camera_calibration.py</code></td><td>~278</td><td>Intrinsic calibration (checkerboard), <code>pixel_to_table_ray()</code>, <code>triangulate_point()</code>.</td></tr>
+<tr><td><code>yolo_ik_agent/calibrate_extrinsic.py</code></td><td>~390</td><td>Wrist camera extrinsic calibration using top camera as reference. Uncommitted, new.</td></tr>
+<tr><td><code>yolo_ik_agent/arm_kinematics.py</code></td><td>&mdash;</td><td>FK/IK via URDF. <code>get_wrist_camera_pose()</code> is what the preset approach replaces.</td></tr>
+<tr><td><code>yolo_ik_agent/config.py</code></td><td>&mdash;</td><td>All constants: camera params, URDF offsets, thresholds.</td></tr>
+<tr><td><code>gemini_agent/gemini_robot_agent.py</code></td><td>~1,230</td><td>Reference for Gemini API usage patterns. Model: <code>gemini-3-flash-preview</code>.</td></tr>
+</table>
+
+</body>
+</html>

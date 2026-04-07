@@ -56,7 +56,8 @@ CAMERA_WRIST_NAME = os.environ.get("CAM_WRIST_NAME", "USB2.0_CAM1")
 ROBOT_SERIAL = "5AE6083982"
 ROBOT_PORT = os.environ.get("ROBOT_PORT", "/dev/ttyACM0")
 
-# Leader arm for teleop — override with LEADER_PORT env var or --leader-port CLI arg
+# Leader arm for teleop — looked up by USB serial number, or override with LEADER_PORT env var / --leader-port CLI arg
+LEADER_SERIAL = "5AE6084010"
 LEADER_PORT = os.environ.get("LEADER_PORT", "")
 TELEOP_FPS = 60
 
@@ -1163,10 +1164,15 @@ def confirm_grip():
 # ---- Teleop ----
 
 def find_leader_port():
-    """Find the leader arm port. Uses LEADER_PORT env, or finds a second ttyACM/ttyUSB device."""
+    """Find the leader arm port. Uses LEADER_PORT env, serial number lookup, or finds a second ttyACM/ttyUSB device."""
     if LEADER_PORT:
         return LEADER_PORT
-    # Auto-detect: find serial ports that aren't the follower
+    # Priority 1: serial number lookup
+    port = find_port_by_serial(LEADER_SERIAL)
+    if port:
+        print(f"{C.GREEN}[teleop]{C.RESET} Found leader by serial {LEADER_SERIAL} at {C.CYAN}{port}{C.RESET}")
+        return port
+    # Priority 2: auto-detect — find serial ports that aren't the follower
     try:
         import serial.tools.list_ports
         follower_port = robot.bus.port if robot and hasattr(robot, 'bus') else ROBOT_PORT

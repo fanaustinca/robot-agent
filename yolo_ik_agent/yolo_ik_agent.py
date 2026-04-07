@@ -32,7 +32,7 @@ from config import (
     TOP_CAM_X, TOP_CAM_Y, TOP_CAM_Z, TOP_CAM_PITCH,
     URDF_BASE_OFFSET, C
 )
-from detect import detect_objects, find_object_pixel, annotate_frame, get_model
+from detect import detect_objects, detect_and_verify, find_object_pixel, annotate_frame, get_model
 from arm_kinematics import forward_kinematics, inverse_kinematics, get_wrist_camera_pose, get_chain
 from camera_calibration import load_calibration, pixel_to_table_ray, triangulate_point, TOP_CALIB_FILE, WRIST_CALIB_FILE
 
@@ -281,14 +281,19 @@ def detect_and_locate(target_label=None, use_triangulation=False):
             top_matrix[1, 2] *= sy  # cy
             print(f"{C.DIM}[detect] Scaled calibration {calib_w}x{calib_h} → {frame_w}x{frame_h}{C.RESET}")
 
-    # Detect with YOLO
-    print(f"{C.BLUE}[detect]{C.RESET} Running YOLO on top camera...")
-    detections = detect_objects(frame_top, target_label)
-    if not detections:
-        print(f"{C.YELLOW}[detect]{C.RESET} No objects detected in top camera")
+    # Detect with GroundingDINO + Gemini verification
+    print(f"{C.BLUE}[detect]{C.RESET} Running detection on top camera...")
+    if target_label:
+        detections, verified_idx = detect_and_verify(frame_top, target_label)
+    else:
+        detections = detect_objects(frame_top, target_label)
+        verified_idx = 0 if detections else None
+
+    if not detections or verified_idx is None:
+        print(f"{C.YELLOW}[detect]{C.RESET} No matching objects detected in top camera")
         return None
 
-    best = detections[0]
+    best = detections[verified_idx]
     pixel_top = best["center"]
     print(f"{C.GREEN}[detect]{C.RESET} Found: {best['label']} ({best['confidence']:.0%}) at pixel ({pixel_top[0]:.0f}, {pixel_top[1]:.0f})")
 

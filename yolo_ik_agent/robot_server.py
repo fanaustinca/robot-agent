@@ -272,8 +272,7 @@ def init_cameras():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_TOP_WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_TOP_HEIGHT)
                 cap.set(cv2.CAP_PROP_SHARPNESS, 7)
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)  # disable autofocus
-                cap.set(cv2.CAP_PROP_FOCUS, 40)     # fixed focus for table distance
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # autofocus on
             else:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_HEIGHT)
