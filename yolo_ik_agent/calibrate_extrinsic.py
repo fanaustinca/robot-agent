@@ -238,8 +238,8 @@ def run_calibration():
                         best_wrist = wrp
                         best_world = wp
 
-            if best_err > 20:
-                print(f"{C.YELLOW}  Skipped: reprojection error too high ({best_err:.1f}px){C.RESET}")
+            if best_err > 10:
+                print(f"{C.YELLOW}  Skipped: reprojection error too high ({best_err:.1f}px) — try moving checkerboard{C.RESET}")
                 continue
 
             captures.append((best_wrist, best_world))
@@ -285,7 +285,7 @@ def run_calibration():
                         best_wrist = wrist_pts
                         best_world = wp
 
-            if best_err > 20:
+            if best_err > 10:
                 print(f"{C.YELLOW}  Skipped: reprojection too high ({best_err:.1f}px) — check measurements{C.RESET}")
                 continue
 
@@ -308,33 +308,94 @@ def run_calibration():
     # Solve for wrist camera extrinsics
     print(f"\n{C.BLUE}Solving extrinsics with {len(captures)} captures...{C.RESET}")
 
+    # --- Per-capture error analysis and outlier removal ---
+    n_corners = CHECKERBOARD_INNER_CORNERS[0] * CHECKERBOARD_INNER_CORNERS[1]
+    print(f"\n  Per-capture reprojection error (pre-filter):")
+
+    # First pass: solve with all points to get initial estimate
     all_img_pts = np.vstack([c[0] for c in captures]).astype(np.float64)
     all_world_pts = np.vstack([c[1] for c in captures]).astype(np.float64)
 
     success, rvec, tvec = cv2.solvePnP(
-        all_world_pts, all_img_pts, wrist_matrix, wrist_dist
+        all_world_pts, all_img_pts, wrist_matrix, wrist_dist,
+        flags=cv2.SOLVEPNP_ITERATIVE
     )
-
     if not success:
         print(f"{C.RED}solvePnP failed!{C.RESET}")
         return
 
-    # Also try RANSAC for robustness
+    # Evaluate each capture individually
+    capture_errors = []
+    for i, (img_pts, world_pts) in enumerate(captures):
+        proj, _ = cv2.projectPoints(world_pts, rvec, tvec, wrist_matrix, wrist_dist)
+        err = np.mean(np.linalg.norm(proj.reshape(-1, 2) - img_pts, axis=1))
+        capture_errors.append(err)
+        marker = f"{C.RED}  *** OUTLIER" if err > 15 else ""
+        print(f"    Capture {i+1}: {err:.2f} px{marker}{C.RESET}")
+
+    # Remove outlier captures (error > 2x median)
+    median_err = np.median(capture_errors)
+    threshold = max(median_err * 2.5, 10.0)  # at least 10px, or 2.5x median
+    good_captures = []
+    removed = 0
+    for i, (cap, err) in enumerate(zip(captures, capture_errors)):
+        if err <= threshold:
+            good_captures.append(cap)
+        else:
+            removed += 1
+            print(f"    {C.YELLOW}Removed capture {i+1} (err={err:.1f}px > threshold={threshold:.1f}px){C.RESET}")
+
+    if removed > 0:
+        print(f"  Kept {len(good_captures)}/{len(captures)} captures (removed {removed} outliers)")
+    if len(good_captures) < 4:
+        print(f"{C.RED}Too few good captures remaining ({len(good_captures)}). Need more data.{C.RESET}")
+        return
+
+    # Re-solve with clean data
+    all_img_pts = np.vstack([c[0] for c in good_captures]).astype(np.float64)
+    all_world_pts = np.vstack([c[1] for c in good_captures]).astype(np.float64)
+
+    success, rvec, tvec = cv2.solvePnP(
+        all_world_pts, all_img_pts, wrist_matrix, wrist_dist,
+        flags=cv2.SOLVEPNP_ITERATIVE
+    )
+    if not success:
+        print(f"{C.RED}solvePnP failed after filtering!{C.RESET}")
+        return
+
+    # Refine with Levenberg-Marquardt (VVS)
+    try:
+        rvec, tvec = cv2.solvePnPRefineVVS(
+            all_world_pts, all_img_pts, wrist_matrix, wrist_dist, rvec, tvec
+        )
+        print(f"  {C.GREEN}Refined with VVS (Levenberg-Marquardt){C.RESET}")
+    except Exception:
+        pass  # older OpenCV may not have this
+
+    # Also try RANSAC and pick whichever is better
     success_r, rvec_r, tvec_r, inliers = cv2.solvePnPRansac(
-        all_world_pts, all_img_pts, wrist_matrix, wrist_dist
+        all_world_pts, all_img_pts, wrist_matrix, wrist_dist,
+        reprojectionError=5.0, iterationsCount=1000
     )
     if success_r and inliers is not None:
         n_inliers = len(inliers)
         n_total = len(all_world_pts)
         print(f"  RANSAC: {n_inliers}/{n_total} inliers")
-        if n_inliers > n_total * 0.7:
+        # Compare reprojection errors
+        proj_cur, _ = cv2.projectPoints(all_world_pts, rvec, tvec, wrist_matrix, wrist_dist)
+        err_cur = np.mean(np.linalg.norm(proj_cur.reshape(-1, 2) - all_img_pts, axis=1))
+        proj_ran, _ = cv2.projectPoints(all_world_pts, rvec_r, tvec_r, wrist_matrix, wrist_dist)
+        err_ran = np.mean(np.linalg.norm(proj_ran.reshape(-1, 2) - all_img_pts, axis=1))
+        print(f"  Iterative: {err_cur:.2f} px  |  RANSAC: {err_ran:.2f} px")
+        if err_ran < err_cur:
             rvec, tvec = rvec_r, tvec_r
+            print(f"  {C.GREEN}Using RANSAC solution (lower error){C.RESET}")
 
     R_cam_from_world, _ = cv2.Rodrigues(rvec)
     cam_pos_world = (-R_cam_from_world.T @ tvec).flatten()
     R_world_from_cam = R_cam_from_world.T
 
-    # Reprojection error
+    # Final reprojection error
     projected, _ = cv2.projectPoints(all_world_pts, rvec, tvec, wrist_matrix, wrist_dist)
     projected = projected.reshape(-1, 2)
     errors = np.linalg.norm(projected - all_img_pts, axis=1)
@@ -355,6 +416,12 @@ def run_calibration():
     print(f"\n  Optical axis: right={optical_axis[0]:.3f} fwd={optical_axis[1]:.3f} up={optical_axis[2]:.3f}")
     print(f"  Image right:  right={image_right[0]:.3f} fwd={image_right[1]:.3f} up={image_right[2]:.3f}")
     print(f"\n  Reprojection error: mean={mean_err:.2f} px, max={max_err:.2f} px")
+    if mean_err < 3:
+        print(f"  {C.GREEN}Excellent calibration!{C.RESET}")
+    elif mean_err < 8:
+        print(f"  {C.GREEN}Good calibration.{C.RESET}")
+    else:
+        print(f"  {C.YELLOW}Mediocre — consider recalibrating with more varied positions.{C.RESET}")
     print(f"  Joint angles: {[f'{a:.1f}' for a in angles]}")
 
     # Sanity checks

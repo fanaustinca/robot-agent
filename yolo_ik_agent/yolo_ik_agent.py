@@ -178,13 +178,25 @@ def get_joint_angles():
     return angles
 
 
+
+# IK correction: URDF geometry doesn't perfectly match physical arm
+# Applied only to IK targets, not camera calculations
+IK_OFFSET_RIGHT = -0.06   # arm overshoots right
+IK_OFFSET_FWD = -0.075   # arm overshoots forward
+IK_OFFSET_UP = 0.0
+
 def move_to_xyz(target_xyz, current_angles=None):
     """Compute IK and move the arm to a 3D position (physical coords: right, forward, up).
     Returns the computed joint angles or None on failure."""
+    # Apply IK correction offset
+    corrected = np.array(target_xyz, dtype=float)
+    corrected[0] += IK_OFFSET_RIGHT
+    corrected[1] += IK_OFFSET_FWD
+    corrected[2] += IK_OFFSET_UP
     print(f"{C.BLUE}[ik]{C.RESET} Target (physical): right={target_xyz[0]*100:.1f}cm fwd={target_xyz[1]*100:.1f}cm up={target_xyz[2]*100:.1f}cm")
 
     # Convert physical world coords to URDF frame for IK
-    urdf_target = physical_to_urdf(target_xyz)
+    urdf_target = physical_to_urdf(corrected)
     print(f"{C.DIM}[ik] URDF target: x={urdf_target[0]*100:.1f} y={urdf_target[1]*100:.1f} z={urdf_target[2]*100:.1f}{C.RESET}")
 
     if current_angles is None:
@@ -246,6 +258,18 @@ def get_top_camera_extrinsics():
     return position, rotation
 
 
+def get_wrist_observe_extrinsics():
+    """Get the wrist camera's position and rotation at the /observe position.
+    Position: directly measured (more accurate than FK).
+    Rotation: from FK (joint lengths don't affect rotation, only position)."""
+    from config import WRIST_CAM_OBSERVE_X, WRIST_CAM_OBSERVE_Y, WRIST_CAM_OBSERVE_Z
+    position = np.array([WRIST_CAM_OBSERVE_X, WRIST_CAM_OBSERVE_Y, WRIST_CAM_OBSERVE_Z])
+    # Get rotation from FK — joint lengths affect position but not rotation
+    observe_angles = [-21.5, -42.2, -6.5, 96.1, -90.0]
+    _, rotation = get_wrist_camera_pose(observe_angles)
+    return position, rotation
+
+
 def detect_and_locate(target_label=None, use_triangulation=False):
     """Detect the target object and compute its 3D position.
 
@@ -297,6 +321,15 @@ def detect_and_locate(target_label=None, use_triangulation=False):
     pixel_top = best["center"]
     print(f"{C.GREEN}[detect]{C.RESET} Found: {best['label']} ({best['confidence']:.0%}) at pixel ({pixel_top[0]:.0f}, {pixel_top[1]:.0f})")
 
+    # Push annotated detection to stream overlay
+    try:
+        annotated_top = annotate_frame(frame_top, detections, target_idx=verified_idx)
+        _, buf = cv2.imencode(".jpg", annotated_top, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        top_b64 = base64.b64encode(buf.tobytes()).decode()
+        requests.post(f"{ROBOT_SERVER}/detection_overlay", json={"top": top_b64}, timeout=3)
+    except Exception:
+        pass
+
     if not use_triangulation:
         # Phase 1: Table-plane intersection
         cam_pos, cam_rot = get_top_camera_extrinsics()
@@ -313,12 +346,6 @@ def detect_and_locate(target_label=None, use_triangulation=False):
         wrist_matrix, wrist_dist, wrist_calib_res = load_calibration(WRIST_CALIB_FILE)
         if wrist_matrix is None:
             print(f"{C.YELLOW}[detect]{C.RESET} Wrist camera not calibrated, falling back to table-plane")
-            return detect_and_locate(target_label, use_triangulation=False)
-
-        # Read joint angles BEFORE getting wrist frame (arm must be stationary)
-        current_angles = get_joint_angles()
-        if current_angles is None:
-            print(f"{C.YELLOW}[detect]{C.RESET} Cannot read joint angles, falling back to table-plane")
             return detect_and_locate(target_label, use_triangulation=False)
 
         frame_wrist = get_snapshot("wrist")
@@ -348,24 +375,61 @@ def detect_and_locate(target_label=None, use_triangulation=False):
         pixel_wrist = detections_wrist[0]["center"]
         print(f"{C.GREEN}[detect]{C.RESET} Wrist detection: {detections_wrist[0]['label']} ({detections_wrist[0]['confidence']:.0%}) at pixel ({pixel_wrist[0]:.0f}, {pixel_wrist[1]:.0f})")
 
-        # Get camera poses in physical world frame
-        wrist_pos, wrist_rot = get_wrist_camera_pose(current_angles)
+        # Top camera ray → table plane intersection for X/Y (most accurate)
         cam_pos_top, cam_rot_top = get_top_camera_extrinsics()
+        point_top = pixel_to_table_ray(pixel_top, top_matrix, top_dist, cam_pos_top, cam_rot_top)
+        if point_top is None:
+            print(f"{C.RED}[detect]{C.RESET} Top camera ray doesn't hit table")
+            return None
 
-        print(f"{C.DIM}[detect] Top cam pos: right={cam_pos_top[0]*100:.1f} fwd={cam_pos_top[1]*100:.1f} up={cam_pos_top[2]*100:.1f}{C.RESET}")
-        print(f"{C.DIM}[detect] Wrist cam pos: right={wrist_pos[0]*100:.1f} fwd={wrist_pos[1]*100:.1f} up={wrist_pos[2]*100:.1f}{C.RESET}")
+        print(f"{C.DIM}[detect] Top cam X/Y: right={point_top[0]*100:.1f}cm fwd={point_top[1]*100:.1f}cm{C.RESET}")
 
-        point = triangulate_point(
-            pixel_top, pixel_wrist,
-            top_matrix, top_dist, wrist_matrix, wrist_dist,
-            cam_pos_top, cam_rot_top, wrist_pos, wrist_rot
-        )
+        # Wrist camera ray → estimate Z (height) at the top camera's X/Y
+        wrist_pos, wrist_rot = get_wrist_observe_extrinsics()
 
-        # Use triangulated X/Y but clamp Z to table level
-        # (Z from stereo is unreliable until wrist extrinsics are perfectly calibrated)
-        print(f"{C.DIM}[detect] Raw triangulated: right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm{C.RESET}")
-        point[2] = GRIPPER_CLEARANCE
-        print(f"{C.GREEN}[detect]{C.RESET} 3D position (stereo): right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm")
+        # Compute wrist camera ray direction from pixel
+        pts_w = np.array([[[pixel_wrist[0], pixel_wrist[1]]]], dtype=np.float64)
+        undist_w = cv2.undistortPoints(pts_w, wrist_matrix, wrist_dist, P=wrist_matrix)
+        uw, vw = undist_w[0, 0]
+        fx_w, fy_w = wrist_matrix[0, 0], wrist_matrix[1, 1]
+        cx_w, cy_w = wrist_matrix[0, 2], wrist_matrix[1, 2]
+        ray_cam_w = np.array([(uw - cx_w) / fx_w, (vw - cy_w) / fy_w, 1.0])
+        ray_world_w = wrist_rot @ ray_cam_w
+
+        # Find t where wrist ray passes through top camera's X/Y
+        # wrist_pos + t * ray_world = [X_top, Y_top, Z_unknown]
+        # Use X component: t = (X_top - wrist_pos[0]) / ray_world[0]
+        # Use Y component: t = (Y_top - wrist_pos[1]) / ray_world[1]
+        # Average for robustness
+        t_vals = []
+        for i in range(2):  # X and Y
+            if abs(ray_world_w[i]) > 1e-4:
+                t_vals.append((point_top[i] - wrist_pos[i]) / ray_world_w[i])
+        if t_vals:
+            t_avg = np.mean(t_vals)
+            z_wrist = wrist_pos[2] + t_avg * ray_world_w[2]
+            print(f"{C.DIM}[detect] Wrist Z estimate: {z_wrist*100:.1f}cm (t_spread={max(t_vals)-min(t_vals):.3f}){C.RESET}")
+        else:
+            z_wrist = None
+            print(f"{C.DIM}[detect] Wrist ray too vertical for Z estimate{C.RESET}")
+
+        # Use wrist Z if reasonable, then re-cast top camera ray at that Z for correct X/Y
+        z_reasonable = z_wrist is not None and TABLE_Z <= z_wrist <= 0.20
+        if z_reasonable:
+            # Re-intersect top camera ray at the wrist-estimated Z
+            point = pixel_to_table_ray(pixel_top, top_matrix, top_dist, cam_pos_top, cam_rot_top, table_z=z_wrist)
+            if point is None:
+                point = point_top.copy()
+                point[2] = z_wrist
+            else:
+                point[2] = z_wrist
+            print(f"{C.GREEN}[detect]{C.RESET} 3D position (top ray @ wrist Z): right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm")
+        else:
+            point = point_top.copy()
+            point[2] = GRIPPER_CLEARANCE
+            if z_wrist is not None:
+                print(f"{C.YELLOW}[detect]{C.RESET} Wrist Z={z_wrist*100:.1f}cm out of range, using table level")
+            print(f"{C.GREEN}[detect]{C.RESET} 3D position (top X/Y, table Z): right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm")
         return point
 
 
@@ -391,6 +455,10 @@ def pickup_sequence(target_label, use_stereo=False):
     target_pos = detect_and_locate(target_label, use_triangulation=use_stereo)
     if target_pos is None:
         print(f"{C.RED}[pickup]{C.RESET} Cannot locate target — aborting")
+        try:
+            requests.delete(f"{ROBOT_SERVER}/detection_overlay", timeout=3)
+        except Exception:
+            pass
         move_preset("home")
         return False
 
@@ -413,9 +481,12 @@ def pickup_sequence(target_label, use_stereo=False):
     time.sleep(0.3)
 
     # Lift shoulder 5 degrees to keep gripper off the floor
+    print(f"{C.BLUE}[5b/7]{C.RESET} Lifting shoulder 5°...")
     current = _get_current_joints_dict()
     if current:
-        lift_val = current.get("shoulder_lift", 0) - 8
+        cur_lift = current.get("shoulder_lift", 0)
+        lift_val = cur_lift - 5
+        print(f"{C.DIM}[lift] shoulder_lift: {cur_lift:.1f} → {lift_val:.1f}{C.RESET}")
         _interpolate_move({"shoulder_lift": lift_val}, steps=5, delay=0.04)
     time.sleep(0.3)
 
@@ -440,6 +511,12 @@ def pickup_sequence(target_label, use_stereo=False):
     print(f"{C.BLUE}[drop]{C.RESET} Dropping...")
     _send_joints({"gripper": 100})
     time.sleep(0.5)
+
+    # Clear detection overlay
+    try:
+        requests.delete(f"{ROBOT_SERVER}/detection_overlay", timeout=3)
+    except Exception:
+        pass
 
     print(f"\n{C.GREEN}{C.BOLD}Pickup complete!{C.RESET}\n")
     return True

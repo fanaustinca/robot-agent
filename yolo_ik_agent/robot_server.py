@@ -114,6 +114,10 @@ agent_state = {
     "confirm_result": None,   # "y" or "n" — set by dashboard, read by agent
 }
 
+# ---- Detection Overlay (agent pushes annotated frames to show on stream) ----
+# {"top": base64_jpeg or None, "wrist": base64_jpeg or None, "ts": float}
+detection_overlay = {"top": None, "wrist": None, "ts": 0}
+
 # ---- Chat Log (synced between CLI agent and dashboard) ----
 # Each entry: {"role": "user"|"agent"|"system", "text": str, "ts": float, "id": int}
 chat_log = []
@@ -417,11 +421,17 @@ def mjpeg_generator(name):
             time.sleep(0.2)
             continue
         fail_count = 0
-        sw = SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH
-        sh = SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT
-        frame = cv2.resize(frame, (sw, sh))
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
+        # Use detection overlay if recent (within 10 seconds)
+        overlay_b64 = detection_overlay.get(name)
+        if overlay_b64 and (time.time() - detection_overlay.get("ts", 0)) < 10:
+            overlay_bytes = base64.b64decode(overlay_b64)
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + overlay_bytes + b"\r\n")
+        else:
+            sw = SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH
+            sh = SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT
+            frame = cv2.resize(frame, (sw, sh))
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
         time.sleep(0.05)  # ~20 fps target (cameras deliver ~12-15fps max)
 
 @app.route("/stream/<name>")
@@ -1366,6 +1376,24 @@ def enable():
         return jsonify({"error": str(e)}), 500
 
 # ---- Agent State ----
+
+@app.route("/detection_overlay", methods=["POST"])
+def push_detection_overlay():
+    """Agent pushes annotated detection frames to show on the camera streams."""
+    data = request.json or {}
+    if "top" in data:
+        detection_overlay["top"] = data["top"]
+    if "wrist" in data:
+        detection_overlay["wrist"] = data["wrist"]
+    detection_overlay["ts"] = time.time()
+    return jsonify({"ok": True})
+
+@app.route("/detection_overlay", methods=["DELETE"])
+def clear_detection_overlay():
+    """Clear the detection overlay."""
+    detection_overlay["top"] = None
+    detection_overlay["wrist"] = None
+    return jsonify({"ok": True})
 
 @app.route("/agent_state", methods=["POST"])
 def update_agent_state():

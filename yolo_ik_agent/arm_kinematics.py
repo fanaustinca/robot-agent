@@ -137,7 +137,8 @@ def get_wrist_camera_pose(joint_angles_deg):
                   (camera: +Z = optical axis, +X = right in image, +Y = down in image)
     """
     from config import (
-        WRIST_CAM_FORWARD, WRIST_CAM_UP, WRIST_CAM_RIGHT, WRIST_CAM_PITCH,
+        WRIST_CAM_FORWARD, WRIST_CAM_UP, WRIST_CAM_RIGHT,
+        WRIST_CAM_MOUNT_TILT,
         URDF_BASE_OFFSET, URDF_TO_PHYS_ROT,
     )
 
@@ -174,19 +175,20 @@ def get_wrist_camera_pose(joint_angles_deg):
     # Convert rotation from URDF to physical frame
     physical_rot_link = URDF_TO_PHYS_ROT @ urdf_rot
 
-    # Camera optical frame in link's local frame
-    # Empirically calibrated: camera forward=-Y, camera up=-Z
-    # (the URDF joint rpy values twist the local frame)
-    rot_fwd = np.array([0, -1.0, 0])
-    rot_up = np.array([0, 0, -1.0])
-    rot_right = np.cross(rot_fwd, rot_up)
-    p = np.radians(WRIST_CAM_PITCH)
-    sp, cp = np.sin(p), np.cos(p)
-    cam_z_local = cp * rot_fwd + (-sp) * rot_up  # optical axis
-    cam_x_local = rot_right                        # image right
-    cam_y_local = np.cross(cam_z_local, cam_x_local)  # image down
-    cam_from_link = np.column_stack([cam_x_local, cam_y_local, cam_z_local])
-    physical_rot = physical_rot_link @ cam_from_link
+    # Derive camera rotation from FK link axes
+    # Camera is on TOP of the wrist, looking DOWN
+    # Optical axis is in the link's YZ plane: -Z rotated toward -Y by WRIST_CAM_MOUNT_TILT
+    # (rotation around link X axis = gripper forward axis)
+    t = np.radians(WRIST_CAM_MOUNT_TILT)
+    st, ct = np.sin(t), np.cos(t)
+
+    # Camera axes in link's LOCAL frame (X=gripper fwd, Y=left, Z=up)
+    cam_z_local = np.array([0, st, -ct])       # optical axis: -Z tilted toward -Y
+    cam_x_local = np.array([1, 0, 0])          # image right: +X (gripper forward)
+    cam_y_local = np.array([0, -ct, -st])       # image down: completes right-handed frame
+
+    # Transform from link-local to physical world frame
+    physical_rot = physical_rot_link @ np.column_stack([cam_x_local, cam_y_local, cam_z_local])
 
     return physical_pos, physical_rot
 

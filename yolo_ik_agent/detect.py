@@ -22,7 +22,7 @@ from config import YOLO_CONFIDENCE, YOLO_DEVICE, C
 _model = None
 _processor = None
 _gemini_client = None
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-preview-05-20")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 
 def get_model():
     """Load GroundingDINO model (cached)."""
@@ -215,9 +215,9 @@ def detect_and_verify(frame, target_label):
     if verified_idx is not None:
         return detections, verified_idx
 
-    # Gemini unavailable or rejected — fall back to highest confidence
-    print(f"{C.DIM}[detect] Falling back to highest confidence detection{C.RESET}")
-    return detections, 0
+    # Gemini rejected all detections — return None to abort
+    print(f"{C.YELLOW}[detect]{C.RESET} Gemini rejected all detections — aborting")
+    return detections, None
 
 
 def find_object_pixel(frame, target_label=None):

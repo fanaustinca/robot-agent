@@ -41,18 +41,27 @@ CHECKERBOARD_SQUARE_SIZE = 0.032     # 3.2 cm per square (measured from chess bo
 
 # ---- Top Camera Extrinsic (position relative to arm base) ----
 # Physical world frame: +X = right, +Y = forward, +Z = up (relative to arm base on table)
-TOP_CAM_X = -0.21           # camera is 21 cm to the LEFT of the arm base
+TOP_CAM_X = -0.20           # camera is 20 cm to the LEFT of the arm base
 TOP_CAM_Y = 0.0             # camera roughly even forward/back with arm base
-TOP_CAM_Z = 0.26            # camera lens 26 cm above arm base (31cm above table - 5cm base height)
-TOP_CAM_PITCH = -43.0       # degrees below horizontal (-90 = straight down)
+TOP_CAM_Z = 0.30            # camera lens 35 cm above table - 5 cm base height = 30 cm above arm base
+TOP_CAM_PITCH = -45.0       # degrees below horizontal (-90 = straight down)
 
 # ---- Wrist Camera Mount (relative to wrist roll joint) ----
 # Camera is mounted on the wrist roll link, centered left-right
+# Wrist roll joint is 10cm from gripper tip. Camera is 5.5cm forward of roll joint.
 # Offset is in the wrist roll link's local frame (before roll rotation)
-WRIST_CAM_FORWARD = 0.006    # 0.6 cm forward of roll joint (in local -Z)
-WRIST_CAM_UP = 0.023         # 2.3 cm above roll joint (in local +Y)
-WRIST_CAM_RIGHT = -0.012     # 1.2 cm to the left (in local +X)
-WRIST_CAM_PITCH = -57.0      # pitch angle in link frame (empirically calibrated)
+WRIST_CAM_FORWARD = 0.055    # 5.5 cm forward of roll joint (in local -Z)
+WRIST_CAM_UP = 0.06          # 6 cm above roll joint (in local +Y)
+WRIST_CAM_RIGHT = 0.0        # centered (no lateral offset)
+WRIST_CAM_MOUNT_TILT = -30.0   # camera tilt in link YZ plane: 0 = along -Z, negative = toward -Y (steeper down)
+
+# ---- Wrist Camera at Observe Position (directly measured) ----
+# Physical world frame: +X = right, +Y = forward, +Z = up (relative to arm base)
+# Measured with arm at /observe preset. Used for stereo triangulation instead of FK.
+WRIST_CAM_OBSERVE_X = -0.04      # 4 cm to the left of arm base
+WRIST_CAM_OBSERVE_Y = 0.15       # 15 cm forward of arm base
+WRIST_CAM_OBSERVE_Z = 0.28       # 28 cm above arm base
+# Rotation is computed from FK at observe joint angles (joint lengths don't affect rotation)
 
 # ---- URDF Base Offset ----
 # The URDF origin is offset from the physical arm base (from baseframe joint in URDF)
