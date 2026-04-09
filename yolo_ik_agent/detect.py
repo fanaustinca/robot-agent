@@ -24,12 +24,14 @@ _processor = None
 _gemini_client = None
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 
+GDINO_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "grounding-dino-tiny")
+
 def get_model():
-    """Load GroundingDINO model (cached)."""
+    """Load GroundingDINO model (cached). Uses local path if available, else HuggingFace."""
     global _model, _processor
     if _model is None:
         from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        model_id = "IDEA-Research/grounding-dino-tiny"
+        model_id = GDINO_MODEL_PATH if os.path.isdir(GDINO_MODEL_PATH) else "IDEA-Research/grounding-dino-tiny"
         print(f"{C.BLUE}[detect]{C.RESET} Loading GroundingDINO ({model_id})...")
         _processor = AutoProcessor.from_pretrained(model_id)
         _model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)

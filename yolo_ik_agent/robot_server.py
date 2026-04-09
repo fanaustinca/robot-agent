@@ -356,6 +356,7 @@ PRESETS = {
     "default": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0},
     "rest":    {"shoulder_pan": -1.10, "shoulder_lift": -102.24, "elbow_flex": 96.57, "wrist_flex": 76.35, "wrist_roll": -86.02, "gripper": 1.20},
     "drop":    {"shoulder_pan": -47.08, "shoulder_lift": 10.46, "elbow_flex": -12.44, "wrist_flex": 86.20, "wrist_roll": -94.64, "gripper": 0},
+    "side_view": {"shoulder_pan": -5.5, "shoulder_lift": 24.1, "elbow_flex": 65.6, "wrist_flex": -71.6, "wrist_roll": -86.3, "gripper": 100},
 }
 
 # ---- Routes ----
@@ -484,6 +485,18 @@ button.active{background:#0f0}
   <button id="btn-clear-roi" onclick="clearROI()" style="background:#f44;display:none">Clear ROI</button>
   <span id="status" style="color:#0f0"></span>
 </div>
+<div class="controls">
+  <div style="position:relative;display:inline-block">
+    <input id="cmd-input" type="text" placeholder="Command (e.g. pick up red block)" style="width:350px" onkeydown="cmdKeydown(event)" oninput="cmdAutocomplete()" autocomplete="off">
+    <div id="cmd-suggest" style="display:none;position:absolute;left:0;top:100%;width:100%;background:#16213e;border:1px solid #0af;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;z-index:100;font-size:13px"></div>
+  </div>
+  <button id="btn-run" onclick="runCmd()">Run</button>
+  <button id="btn-stop" onclick="stopCmd()" style="background:#f44;display:none">Stop</button>
+  <button onclick="toggleHelp()" style="background:#555">Help</button>
+  <span id="cmd-status" style="color:#0f0"></span>
+</div>
+<div id="cmd-help" style="background:#16213e;padding:15px;border-radius:8px;margin-bottom:15px;display:none;font-size:13px;line-height:1.6"></div>
+<div id="cmd-log" style="background:#16213e;padding:10px;border-radius:8px;margin-bottom:15px;display:none;max-height:200px;overflow-y:auto;font-size:13px"></div>
 <div class="container">
   <div class="cam">
     <h2>Top Camera <span id="top-mode">(live)</span></h2>
@@ -586,6 +599,117 @@ function runDetect(){
     if(detecting)timer=setTimeout(runDetect,100);
   }).catch(function(){document.getElementById('status').innerText='error';if(detecting)timer=setTimeout(runDetect,500)});
 }
+
+var cmdCommands=[
+  {cmd:'/home',desc:'Move to home position'},
+  {cmd:'/observe',desc:'Move to observe position'},
+  {cmd:'/ready',desc:'Move to ready position'},
+  {cmd:'/rest',desc:'Move to rest position'},
+  {cmd:'/drop',desc:'Move to drop position'},
+  {cmd:'/pick ',desc:'Pick up object (e.g. /pick red block)'},
+  {cmd:'/pick3d ',desc:'Stereo 3D pickup (e.g. /pick3d red block)'},
+  {cmd:'/locate ',desc:'Detect + 3D position (e.g. /locate red block)'},
+  {cmd:'/locate3d ',desc:'Stereo locate (e.g. /locate3d red block)'},
+  {cmd:'/ik ',desc:'Move to position (e.g. /ik -5 30 8)'},
+  {cmd:'/fk',desc:'Show current gripper position'},
+  {cmd:'/t on',desc:'Enable torque (lock motors)'},
+  {cmd:'/t off',desc:'Disable torque (free move)'},
+  {cmd:'/gripper open',desc:'Open gripper'},
+  {cmd:'/gripper close',desc:'Close gripper'},
+  {cmd:'/pos ',desc:'Move gripper to object without picking up (e.g. /pos red block)'},
+  {cmd:'/calibrate_surface ',desc:'Calibrate surface height (e.g. /calibrate_surface red block)'},
+];
+var cmdSelIdx=-1;
+function cmdAutocomplete(){
+  var val=document.getElementById('cmd-input').value,box=document.getElementById('cmd-suggest');
+  if(!val.startsWith('/')){box.style.display='none';cmdSelIdx=-1;return}
+  var matches=cmdCommands.filter(function(c){return c.cmd.toLowerCase().startsWith(val.toLowerCase())});
+  if(matches.length===0||(matches.length===1&&matches[0].cmd.trim().toLowerCase()===val.trim().toLowerCase())){box.style.display='none';cmdSelIdx=-1;return}
+  if(cmdSelIdx>=matches.length)cmdSelIdx=matches.length-1;
+  box.innerHTML=matches.map(function(m,i){return '<div style="padding:6px 8px;cursor:pointer;border-bottom:1px solid #333;'+(i===cmdSelIdx?'background:#0af;color:#000':'')+'" onmousedown="pickCmd('+JSON.stringify(m.cmd)+')" onmouseover="cmdSelIdx='+i+';cmdAutocomplete()"><span style="color:'+(i===cmdSelIdx?'#000':'#0f0')+'">'+m.cmd.trim()+'</span> <span style="color:'+(i===cmdSelIdx?'#333':'#888')+'"> &mdash; '+m.desc+'</span></div>'}).join('');
+  box.style.display='block';
+}
+function pickCmd(cmd){
+  document.getElementById('cmd-input').value=cmd;
+  document.getElementById('cmd-suggest').style.display='none';cmdSelIdx=-1;
+  document.getElementById('cmd-input').focus();
+}
+function cmdKeydown(e){
+  var box=document.getElementById('cmd-suggest');
+  if(box.style.display==='none'){
+    if(e.key==='Enter'){runCmd();return}
+    if(e.key==='ArrowUp'&&cmdHistory.length>0){e.preventDefault();if(cmdHistIdx===-1)cmdHistIdx=cmdHistory.length;cmdHistIdx=Math.max(0,cmdHistIdx-1);document.getElementById('cmd-input').value=cmdHistory[cmdHistIdx];return}
+    if(e.key==='ArrowDown'&&cmdHistory.length>0){e.preventDefault();cmdHistIdx=Math.min(cmdHistory.length,cmdHistIdx+1);document.getElementById('cmd-input').value=cmdHistIdx>=cmdHistory.length?'':cmdHistory[cmdHistIdx];return}
+    return}
+  var items=box.children,val=document.getElementById('cmd-input').value;
+  var matches=cmdCommands.filter(function(c){return c.cmd.toLowerCase().startsWith(val.toLowerCase())});
+  if(e.key==='ArrowDown'){e.preventDefault();cmdSelIdx=Math.min(cmdSelIdx+1,matches.length-1);cmdAutocomplete()}
+  else if(e.key==='ArrowUp'){e.preventDefault();cmdSelIdx=Math.max(cmdSelIdx-1,0);cmdAutocomplete()}
+  else if(e.key==='Enter'){e.preventDefault();if(cmdSelIdx>=0&&cmdSelIdx<matches.length){pickCmd(matches[cmdSelIdx].cmd)}else{box.style.display='none';runCmd()}}
+  else if(e.key==='Escape'){box.style.display='none';cmdSelIdx=-1}
+  else if(e.key==='Tab'&&matches.length>0){e.preventDefault();pickCmd(matches[cmdSelIdx>=0?cmdSelIdx:0].cmd)}
+}
+document.addEventListener('click',function(e){if(e.target.id!=='cmd-input')document.getElementById('cmd-suggest').style.display='none'});
+function fillCmd(el){document.getElementById('cmd-input').value=el.innerText;document.getElementById('cmd-input').focus()}
+function toggleHelp(){
+  var h=document.getElementById('cmd-help');
+  if(h.style.display==='block'){h.style.display='none';return}
+  h.innerHTML='<h3 style="color:#0ff;margin-bottom:10px">Commands</h3>'+
+    '<table style="width:100%;border-collapse:collapse">'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">pick up &lt;object&gt;</td><td style="color:#888;padding:4px">Pick up an object using top camera</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/pick3d &lt;object&gt;</td><td style="color:#888;padding:4px">Pick up using stereo 3D (both cameras)</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/locate &lt;object&gt;</td><td style="color:#888;padding:4px">Detect + show 3D position (table-plane)</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/locate3d &lt;object&gt;</td><td style="color:#888;padding:4px">Detect + show 3D position (stereo)</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/ik &lt;right&gt; &lt;fwd&gt; &lt;up&gt;</td><td style="color:#888;padding:4px">Move gripper to position (cm)</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/fk</td><td style="color:#888;padding:4px">Show current gripper 3D position</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/home</td><td style="color:#888;padding:4px">Move to home position</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/observe</td><td style="color:#888;padding:4px">Move to observe position (wrist cam view)</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/ready</td><td style="color:#888;padding:4px">Move to ready position</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/rest</td><td style="color:#888;padding:4px">Move to rest (folded) position</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/drop</td><td style="color:#888;padding:4px">Move to drop position</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/gripper open</td><td style="color:#888;padding:4px">Open the gripper</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/gripper close</td><td style="color:#888;padding:4px">Close the gripper</td></tr>'+
+    '<tr><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calibrate_surface</td><td style="color:#888;padding:4px">Calibrate table/surface height using stereo</td></tr>'+
+    '</table>'+
+    '<h3 style="color:#0ff;margin:12px 0 8px">Examples (click to fill)</h3>'+
+    '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">pick up red block</div>'+
+    '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">pick up green lego brick</div>'+
+    '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">pick up blue ball</div>'+
+    '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">grab the yellow cup</div>'+
+    '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">/pick3d red bowl</div>'+
+    '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">/locate bottle</div>'+
+    '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">/ik -5 30 8</div>';
+  h.style.display='block';
+}
+var cmdHistory=JSON.parse(localStorage.getItem('cmdHistory')||'[]'),cmdHistIdx=-1;
+var cmdPoll=null;
+function runCmd(){
+  var cmd=document.getElementById('cmd-input').value.trim();
+  if(!cmd)return;
+  if(cmdHistory.length===0||cmdHistory[cmdHistory.length-1]!==cmd){cmdHistory.push(cmd);localStorage.setItem('cmdHistory',JSON.stringify(cmdHistory.slice(-50)))}
+  cmdHistIdx=-1;
+  document.getElementById('btn-run').style.display='none';
+  document.getElementById('btn-stop').style.display='';
+  document.getElementById('cmd-status').innerText='starting...';
+  var log=document.getElementById('cmd-log');
+  log.style.display='block';log.innerHTML='';
+  fetch('/run_command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})})
+    .then(r=>r.json()).then(data=>{
+      if(data.error){document.getElementById('cmd-status').innerText=data.error;document.getElementById('btn-run').style.display='';document.getElementById('btn-stop').style.display='none';return}
+      document.getElementById('cmd-status').innerText='running...';
+      cmdPoll=setInterval(pollCmd,500);
+    }).catch(function(){document.getElementById('cmd-status').innerText='error';document.getElementById('btn-run').style.display='';document.getElementById('btn-stop').style.display='none'});
+}
+function pollCmd(){
+  fetch('/run_command').then(r=>r.json()).then(data=>{
+    var log=document.getElementById('cmd-log');
+    log.innerHTML=data.log.map(function(l){return '<div style="padding:2px 0;border-bottom:1px solid #333;color:'+(l.includes('error')||l.includes('failed')?'#f44':l.includes('success')||l.includes('Done')?'#0f0':'#ccc')+'">'+l+'</div>'}).join('');
+    log.scrollTop=log.scrollHeight;
+    document.getElementById('cmd-status').innerText=data.running?'running...':'done';
+    if(!data.running){clearInterval(cmdPoll);cmdPoll=null;document.getElementById('btn-run').style.display='';document.getElementById('btn-stop').style.display='none'}
+  });
+}
+function stopCmd(){document.getElementById('cmd-status').innerText='(cannot stop mid-command)'}
 </script>
 </body></html>"""
 
@@ -1395,6 +1519,220 @@ def clear_detection_overlay():
     detection_overlay["wrist"] = None
     return jsonify({"ok": True})
 
+# ---- Command Execution (runs yolo_ik_agent commands from dashboard) ----
+import threading
+_cmd_state = {"running": False, "command": "", "status": "idle", "log": []}
+_cmd_lock = threading.Lock()
+
+def _run_command_thread(command):
+    """Execute a yolo_ik_agent command in a background thread."""
+    import io, contextlib, re as _re
+    try:
+        from yolo_ik_agent import (
+            pickup_sequence, detect_and_locate, move_to_xyz,
+            move_preset, get_joint_angles, forward_kinematics,
+            urdf_to_physical, get_status, _send_joints
+        )
+        with _cmd_lock:
+            _cmd_state["running"] = True
+            _cmd_state["command"] = command
+            _cmd_state["status"] = "running"
+            _cmd_state["log"] = []
+
+        def log(msg):
+            # Strip ANSI codes
+            clean = _re.sub(r'\033\[[0-9;]*m', '', str(msg))
+            with _cmd_lock:
+                _cmd_state["log"].append(clean)
+            print(msg)
+
+        lower = command.lower().strip()
+
+        # Pickup commands
+        pickup_kw = ["pick up", "pickup", "grab", "retrieve", "fetch", "collect"]
+        is_pickup = any(kw in lower for kw in pickup_kw)
+        is_pick3d = lower.startswith("/pick3d")
+
+        is_pick = lower.startswith("/pick ") or lower == "/pick"
+
+        if is_pick:
+            label = command.split(None, 1)[1] if " " in command else None
+            if label:
+                log(f"[cmd] Running pickup: {label}")
+                result = pickup_sequence(label)
+                log(f"[cmd] Result: {'success' if result else 'failed'}")
+            else:
+                log("[cmd] Usage: /pick <object>")
+        elif is_pick3d:
+            label = command.split(None, 1)[1] if " " in command else None
+            if label:
+                log(f"[cmd] Running 3D pickup: {label}")
+                result = pickup_sequence(label, use_stereo=True)
+                log(f"[cmd] Result: {'success' if result else 'failed'}")
+            else:
+                log("[cmd] Usage: /pick3d <object>")
+        elif is_pickup:
+            # Extract object name
+            m = _re.search(r'["\u201c](.+?)["\u201d]', command)
+            if m:
+                target = m.group(1).strip()
+            else:
+                for kw in pickup_kw:
+                    idx = lower.find(kw)
+                    if idx >= 0:
+                        target = command[idx + len(kw):].strip()
+                        target = _re.sub(r'^(the|a|an)\s+', '', target, flags=_re.IGNORECASE).strip()
+                        break
+                else:
+                    target = command
+            if target:
+                log(f"[cmd] Running pickup: {target}")
+                result = pickup_sequence(target)
+                log(f"[cmd] Result: {'success' if result else 'failed'}")
+            else:
+                log("[cmd] What should I pick up?")
+        elif lower.startswith("/locate3d"):
+            label = command.split(None, 1)[1] if " " in command else None
+            log(f"[cmd] Locating (stereo): {label or 'any object'}")
+            pos = detect_and_locate(label, use_triangulation=True)
+            if pos is not None:
+                from yolo_ik_agent import format_position
+                log(f"[cmd] Position: {format_position(pos)}")
+            else:
+                log("[cmd] Object not found")
+        elif lower.startswith("/locate"):
+            label = command.split(None, 1)[1] if " " in command else None
+            log(f"[cmd] Locating: {label or 'any object'}")
+            pos = detect_and_locate(label)
+            if pos is not None:
+                from yolo_ik_agent import format_position
+                log(f"[cmd] Position: {format_position(pos)}")
+            else:
+                log("[cmd] Object not found")
+        elif lower.startswith("/home"):
+            log("[cmd] Moving to home...")
+            move_preset("home")
+            log("[cmd] Done")
+        elif lower.startswith("/observe"):
+            log("[cmd] Moving to observe...")
+            move_preset("observe")
+            log("[cmd] Done")
+        elif lower.startswith("/ready"):
+            log("[cmd] Moving to ready...")
+            move_preset("ready")
+            log("[cmd] Done")
+        elif lower.startswith("/drop"):
+            log("[cmd] Moving to drop...")
+            move_preset("drop")
+            log("[cmd] Done")
+        elif lower.startswith("/rest"):
+            log("[cmd] Moving to rest...")
+            move_preset("rest")
+            log("[cmd] Done")
+        elif lower.startswith("/fk"):
+            angles = get_joint_angles()
+            if angles:
+                urdf_pos = forward_kinematics(angles)
+                phys = urdf_to_physical(urdf_pos)
+                log(f"[cmd] Gripper at: right={phys[0]*100:.1f}cm fwd={phys[1]*100:.1f}cm up={phys[2]*100:.1f}cm")
+                log(f"[cmd] Joints: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}")
+        elif lower.startswith("/ik "):
+            parts = command.split()
+            if len(parts) == 4:
+                try:
+                    x, y, z = float(parts[1])/100, float(parts[2])/100, float(parts[3])/100
+                    log(f"[cmd] Moving to ({parts[1]}, {parts[2]}, {parts[3]}) cm...")
+                    move_to_xyz([x, y, z])
+                    log("[cmd] Done")
+                except ValueError:
+                    log("[cmd] Invalid coordinates")
+            else:
+                log("[cmd] Usage: /ik <right_cm> <fwd_cm> <up_cm>")
+        elif lower.startswith("/gripper"):
+            parts = command.split()
+            if len(parts) > 1 and parts[1].lower() in ("open", "100"):
+                _send_joints({"gripper": 100})
+                log("[cmd] Gripper opened")
+            elif len(parts) > 1 and parts[1].lower() in ("close", "0"):
+                _send_joints({"gripper": 0})
+                log("[cmd] Gripper closed")
+            else:
+                log("[cmd] Usage: /gripper open|close")
+        elif lower.startswith("/t ") or lower in ("/t", "/torque"):
+            parts = command.split()
+            if len(parts) > 1 and parts[1].lower() in ("on", "1"):
+                enabled = True
+            elif len(parts) > 1 and parts[1].lower() in ("off", "0"):
+                enabled = False
+            else:
+                enabled = False  # default toggle off
+            try:
+                import requests as _req
+                _req.post(f"http://localhost:{PORT}/enable", json={"enabled": enabled}, timeout=5)
+                log(f"[cmd] Torque {'ON' if enabled else 'OFF'}")
+            except Exception as e:
+                log(f"[cmd] Error: {e}")
+        elif lower.startswith("/pos ") or lower == "/pos":
+            label = command.split(None, 1)[1] if " " in command else None
+            if not label:
+                log("[cmd] Usage: /pos <object>")
+            else:
+                log(f"[cmd] Positioning at: {label}")
+                pos = detect_and_locate(label, use_triangulation=True)
+                if pos is not None:
+                    from yolo_ik_agent import format_position
+                    log(f"[cmd] Object at: {format_position(pos)}")
+                    log(f"[cmd] Moving to home first...")
+                    move_preset("home")
+                    import time as _time; _time.sleep(0.5)
+                    _send_joints({"gripper": 100})
+                    _time.sleep(0.5)
+                    log(f"[cmd] Moving to target...")
+                    move_to_xyz(pos)
+                    log(f"[cmd] Done — check gripper alignment")
+                else:
+                    log("[cmd] Object not found")
+        elif lower.startswith("/calibrate_surface"):
+            from yolo_ik_agent import calibrate_surface
+            label = command.split(None, 1)[1] if " " in command else None
+            log(f"[cmd] Calibrating surface height{(' with ' + label) if label else ''}...")
+            result = calibrate_surface(label)
+            if result is not None:
+                log(f"[cmd] Origin set: right={result[0]*100:.1f}cm fwd={result[1]*100:.1f}cm up={result[2]*100:.1f}cm")
+            else:
+                log("[cmd] Calibration failed")
+        else:
+            log(f"[cmd] Unknown command: {command}")
+
+    except Exception as e:
+        with _cmd_lock:
+            _cmd_state["log"].append(f"[error] {e}")
+        print(f"{C.RED}[cmd]{C.RESET} Error: {e}")
+    finally:
+        with _cmd_lock:
+            _cmd_state["running"] = False
+            _cmd_state["status"] = "done"
+
+@app.route("/run_command", methods=["POST"])
+def run_command():
+    """Run a yolo_ik_agent command from the dashboard."""
+    data = request.json or {}
+    command = data.get("command", "").strip()
+    if not command:
+        return jsonify({"error": "No command provided"}), 400
+    with _cmd_lock:
+        if _cmd_state["running"]:
+            return jsonify({"error": "A command is already running"}), 409
+    t = threading.Thread(target=_run_command_thread, args=(command,), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "command": command})
+
+@app.route("/run_command", methods=["GET"])
+def get_command_state():
+    """Get the current command execution state."""
+    with _cmd_lock:
+        return jsonify(dict(_cmd_state))
+
 @app.route("/agent_state", methods=["POST"])
 def update_agent_state():
     """Agent pushes its current activity state."""
@@ -1761,4 +2099,30 @@ if __name__ == "__main__":
     threading.Thread(target=history_recorder, daemon=True).start()
     print(f"{C.GREEN}[boot]{C.RESET} History recorder started (sampling every {HISTORY_INTERVAL}s, {HISTORY_MAX_SECS//60}min buffer)")
     run_diagnostics()
+    # Move arm to rest position on startup (direct servo control, no HTTP)
+    if robot is not None:
+        print(f"{C.BLUE}[boot]{C.RESET} Moving arm to rest position...")
+        try:
+            import time as _time
+            rest = PRESETS["rest"]
+            # Read current positions
+            obs = robot.get_observation()
+            current = {}
+            for k, v in obs.items():
+                clean = k.replace(".pos", "")
+                if clean in rest:
+                    current[clean] = float(v)
+            # Interpolate in 20 steps
+            steps = 20
+            for step in range(1, steps + 1):
+                t = step / steps
+                action = {}
+                for joint, target in rest.items():
+                    cur = current.get(joint, target)
+                    action[f"{joint}.pos"] = cur + (target - cur) * t
+                robot.send_action(action)
+                _time.sleep(0.05)
+            print(f"{C.GREEN}[boot]{C.RESET} Arm at rest position")
+        except Exception as e:
+            print(f"{C.YELLOW}[boot]{C.RESET} Could not move to rest: {e}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

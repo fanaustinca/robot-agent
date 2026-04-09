@@ -78,13 +78,15 @@ def build_chain():
     j5 = joints.get("5", {})
     links.append(URDFLink(
         name="gripper_tip",
-        origin_translation=[0.02, 0, 0],
+        origin_translation=[0, 0, -0.10],  # local -Z = physical forward
         origin_orientation=[0, 0, 0],
         rotation=[0, 0, 0],
     ))
 
+    # Joint 5 (wrist roll) is inactive — it rotates around the gripper axis
+    # and doesn't affect tip position. Only pan, lift, elbow, flex are active.
     chain = Chain(name="so101", links=links,
-                  active_links_mask=[False] + [True]*len(joint_order) + [False])
+                  active_links_mask=[False, True, True, True, True, False, False])
     return chain, joint_names
 
 
@@ -112,19 +114,25 @@ def forward_kinematics(joint_angles_deg):
     return transform[:3, 3]
 
 
-def inverse_kinematics(target_xyz, current_angles_deg=None):
-    """Given target (x, y, z) in meters, return 5 joint angles in degrees."""
+def inverse_kinematics(target_xyz, current_angles_deg=None, wrist_roll_deg=-90.0):
+    """Given target (x, y, z) in meters, return 5 joint angles in degrees.
+    Wrist roll is fixed (not solved by IK) since it rotates around the gripper axis."""
     chain = get_chain()
     target = np.array(target_xyz)
 
+    # Initial guess: current angles with wrist roll fixed
     initial = None
     if current_angles_deg is not None:
-        initial = [0] + [np.radians(a) for a in current_angles_deg] + [0]
+        angles = list(current_angles_deg)
+        angles[4] = wrist_roll_deg  # fix roll in initial guess
+        initial = [0] + [np.radians(a) for a in angles] + [0]
 
     angles_rad = chain.inverse_kinematics(target_position=target, initial_position=initial)
 
-    # Extract active joint angles (indices 1-5)
-    return [np.degrees(angles_rad[i]) for i in range(1, 6)]
+    # Extract joint angles (indices 1-5), override roll with fixed value
+    result = [np.degrees(angles_rad[i]) for i in range(1, 6)]
+    result[4] = wrist_roll_deg
+    return result
 
 
 def get_wrist_camera_pose(joint_angles_deg):
@@ -151,7 +159,7 @@ def get_wrist_camera_pose(joint_angles_deg):
 
     # Undo the gripper_tip offset (2cm in local X) to get wrist roll joint position
     # The camera is on the wrist roll link, NOT at the gripper tip
-    GRIPPER_TIP_OFFSET = np.array([0.02, 0, 0])
+    GRIPPER_TIP_OFFSET = np.array([0, 0, -0.10])  # local -Z = physical forward
     wrist_pos_urdf = urdf_pos - urdf_rot @ GRIPPER_TIP_OFFSET
 
     # Camera mount offset in the wrist link's local frame
