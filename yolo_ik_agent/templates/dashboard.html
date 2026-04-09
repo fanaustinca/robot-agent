@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SO-101 Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#eee;font-family:-apple-system,system-ui,sans-serif;padding:16px}
+h1{font-size:20px;font-weight:600;margin-bottom:12px;color:#fff}
+.layout{display:flex;gap:16px;flex-wrap:wrap}
+.left-col{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+.cameras{display:flex;gap:12px}
+.cam-box{flex:1;min-width:0}
+.cam-box p{text-align:center;font-size:14px;color:#888;margin-bottom:4px}
+.cam-box img{width:100%;border-radius:6px;background:#000}
+.panel{width:300px;flex-shrink:0;display:flex;flex-direction:column;gap:12px}
+.chat-card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px;flex:1;display:flex;flex-direction:column;min-height:200px}
+.chat-card h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.chat-log{flex:1;overflow-y:auto;max-height:300px;display:flex;flex-direction:column;gap:6px;padding:4px 0;
+          scrollbar-width:thin;scrollbar-color:#333 transparent}
+.chat-log::-webkit-scrollbar{width:4px}
+.chat-log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
+.chat-msg{padding:6px 10px;border-radius:8px;font-size:13px;line-height:1.4;max-width:90%;word-wrap:break-word;white-space:pre-wrap}
+.chat-msg.user{background:#1565c0;color:#e3f2fd;align-self:flex-end;border-bottom-right-radius:2px}
+.chat-msg.agent{background:#2a2a2a;color:#e0e0e0;align-self:flex-start;border-bottom-left-radius:2px}
+.chat-msg.system{background:#1a1a2a;color:#888;align-self:center;font-size:12px;font-style:italic}
+.chat-msg .msg-source{font-size:10px;opacity:0.5;margin-top:2px}
+.chat-input-row{display:flex;gap:6px;margin-top:8px}
+.chat-input{flex:1;padding:8px 12px;border:1px solid #444;border-radius:6px;background:#222;color:#eee;
+            font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.chat-input:focus{border-color:#42a5f5}
+.chat-send{padding:8px 16px;border:1px solid #388e3c;border-radius:6px;background:#222;color:#66bb6a;
+           font-size:13px;cursor:pointer;font-weight:600;transition:background .15s}
+.chat-send:hover{background:#1b5e20}
+.chat-send:active{background:#2e7d32}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px}
+.card h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.joint-row{display:flex;align-items:center;gap:6px;font-size:13px;padding:5px 0;border-bottom:1px solid #222;font-family:'SF Mono',monospace}
+.joint-row:last-child{border-bottom:none}
+.joint-name{color:#999;width:44px;flex-shrink:0;font-weight:500}
+.joint-deg{color:#4fc3f7;width:52px;text-align:right;flex-shrink:0;font-size:12px}
+.joint-slider{flex:1;-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;background:#333;outline:none;cursor:pointer;min-width:60px}
+.joint-slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#4fc3f7;cursor:pointer;border:2px solid #222}
+.joint-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#4fc3f7;cursor:pointer;border:2px solid #222}
+.joint-slider:hover::-webkit-slider-thumb{background:#81d4fa;box-shadow:0 0 6px rgba(79,195,247,0.4)}
+.joint-input{width:54px;padding:3px 4px;border:1px solid #444;border-radius:4px;background:#222;color:#4fc3f7;
+             font-size:12px;font-family:'SF Mono',monospace;text-align:right;outline:none;transition:border-color .15s}
+.joint-input:focus{border-color:#42a5f5}
+.torque-status{font-size:13px;margin-top:6px;padding:4px 8px;border-radius:4px;text-align:center;font-weight:600}
+.torque-on{background:#1b5e20;color:#66bb6a}
+.torque-off{background:#4e342e;color:#ff8a65}
+.teleop-on{background:#1a237e;color:#7986cb}
+.teleop-off{background:#212121;color:#757575}
+.btn-row{display:flex;gap:6px;flex-wrap:wrap}
+.btn{flex:1;padding:8px 4px;border:1px solid #444;border-radius:6px;background:#222;color:#eee;
+     font-size:13px;cursor:pointer;text-align:center;min-width:60px;transition:background .15s}
+.btn:hover{background:#333}.btn:active{background:#444}
+.btn-green{border-color:#388e3c;color:#66bb6a}.btn-green:hover{background:#1b5e20}
+.btn-red{border-color:#c62828;color:#ef5350}.btn-red:hover{background:#4e1010}
+.btn-blue{border-color:#1565c0;color:#42a5f5}.btn-blue:hover{background:#0d2137}
+.btn-orange{border-color:#e65100;color:#ffb74d}.btn-orange:hover{background:#3e2723}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-dot.ok{background:#66bb6a}.status-dot.err{background:#ef5350}
+#conn{font-size:12px;color:#888;margin-bottom:8px}
+.activity-card{border-color:#444}
+.phase-badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.phase-idle{background:#212121;color:#757575}
+.phase-calibrating{background:#4a148c;color:#ce93d8}
+.phase-prescan{background:#006064;color:#4dd0e1}
+.phase-homing{background:#0d47a1;color:#64b5f6}
+.phase-aligning{background:#e65100;color:#ffb74d}
+.phase-waiting_confirm{background:#b71c1c;color:#ef9a9a;animation:pulse 1.5s infinite}
+.phase-lowering{background:#1a237e;color:#7986cb}
+.phase-gripping{background:#880e4f;color:#f48fb1}
+.phase-lifting{background:#0d47a1;color:#64b5f6}
+.phase-dropping{background:#33691e;color:#aed581}
+.phase-done{background:#1b5e20;color:#66bb6a}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.activity-detail{font-size:13px;color:#bbb;margin-top:6px;min-height:18px}
+.progress-row{display:flex;align-items:center;gap:8px;margin-top:8px}
+.progress-bar{flex:1;height:6px;background:#333;border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:#ffb74d;border-radius:3px;transition:width .3s}
+.progress-text{font-size:12px;color:#888;min-width:40px}
+.confirm-row{display:flex;gap:8px;margin-top:10px}
+.confirm-row .btn{padding:10px;font-size:14px;font-weight:600}
+#confirm-section{display:none}
+.adv-toggle{width:100%;padding:8px;border:1px solid #333;border-radius:8px;background:#1a1a1a;color:#888;
+            font-size:12px;cursor:pointer;text-align:left;margin-top:4px;transition:all .15s}
+.adv-toggle:hover{color:#eee;border-color:#555}
+.adv-panel{display:none;background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px;margin-top:4px}
+.adv-panel.show{display:block}
+.adv-section{margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #222}
+.adv-section:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none}
+.adv-section h3{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.adv-row{display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:2px 0}
+.adv-label{color:#888}.adv-val{color:#4fc3f7;font-family:'SF Mono',monospace}
+.adv-val.ok{color:#66bb6a}.adv-val.warn{color:#ffb74d}.adv-val.err{color:#ef5350}.adv-val.off{color:#757575}
+.conn-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase}
+.conn-badge.connected{background:#1b5e20;color:#66bb6a}
+.conn-badge.partial{background:#e65100;color:#ffb74d}
+.conn-badge.disconnected{background:#4e342e;color:#ff8a65}
+.conn-badge.connecting{background:#0d47a1;color:#64b5f6;animation:pulse 1.5s infinite}
+.adv-input{width:60px;padding:2px 4px;border:1px solid #444;border-radius:4px;background:#222;color:#4fc3f7;
+           font-size:11px;font-family:'SF Mono',monospace;text-align:right;outline:none}
+.adv-input:focus{border-color:#42a5f5}
+.adv-btn{padding:3px 8px;border:1px solid #444;border-radius:4px;background:#222;color:#eee;font-size:11px;cursor:pointer}
+.adv-btn:hover{background:#333}
+.adv-log{max-height:80px;overflow-y:auto;font-size:11px;color:#888;font-family:'SF Mono',monospace;
+         background:#151515;border-radius:4px;padding:6px;scrollbar-width:thin;scrollbar-color:#333 transparent}
+</style>
+</head><body>
+<h1>SO-101 Dashboard</h1>
+<div id="conn"><span class="status-dot" id="dot"></span><span id="conn-text">Connecting...</span></div>
+<div class="layout">
+  <div class="left-col">
+    <div class="cameras">
+      <div class="cam-box"><p>Top</p><img src="/stream/top"></div>
+      <div class="cam-box"><p>Wrist</p><img src="/stream/wrist"></div>
+    </div>
+    <div class="card" style="padding:10px">
+      <h2 style="display:flex;align-items:center;justify-content:space-between">Timeline <span style="font-size:10px;color:#555;text-transform:none;letter-spacing:0">(last 10 min)</span>
+        <button class="btn" id="tl-toggle" style="min-width:40px;padding:2px 8px;font-size:10px;flex:0" onclick="tlOnOff()">ON</button></h2>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn" style="min-width:32px;padding:4px;font-size:14px" id="tl-play" onclick="tlToggle()">&#9654;</button>
+        <input type="range" id="tl-slider" min="0" max="0" value="0" step="1"
+               style="flex:1;-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;background:#333;outline:none;cursor:pointer"
+               oninput="tlSeek(this.value)">
+        <span id="tl-time" style="font-size:11px;color:#888;font-family:'SF Mono',monospace;min-width:48px">--:--</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+        <span style="font-size:11px;color:#666">Speed:</span>
+        <select id="tl-speed" style="background:#222;border:1px solid #444;border-radius:4px;color:#eee;font-size:11px;padding:2px 4px">
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+          <option value="10">10x</option>
+        </select>
+        <span style="font-size:11px;color:#666;margin-left:auto" id="tl-info">0 samples</span>
+        <button class="btn" style="min-width:50px;padding:3px 6px;font-size:11px" onclick="tlGoTo()">Go To</button>
+      </div>
+    </div>
+    <div class="chat-card">
+      <h2>Chat</h2>
+      <div class="chat-log" id="chat-log"></div>
+      <div class="chat-input-row">
+        <input class="chat-input" id="chat-input" type="text" placeholder="Type a message or command..." autocomplete="off"
+               onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="chat-send" onclick="sendChat()">Send</button>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="card activity-card">
+      <h2>Agent Activity</h2>
+      <div><span class="phase-badge phase-idle" id="phase-badge">IDLE</span></div>
+      <div class="activity-detail" id="activity-detail"></div>
+      <div class="progress-row" id="progress-row" style="display:none">
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+        <span class="progress-text" id="progress-text">0/0</span>
+        <button class="btn btn-orange" style="flex:0;min-width:50px;padding:4px 10px;font-size:12px" onclick="skipAlign()">Done</button>
+      </div>
+      <div id="confirm-section" class="confirm-row">
+        <button class="btn btn-green" onclick="confirmGrip('y')">Confirm Grip</button>
+        <button class="btn btn-red" onclick="confirmGrip('n')">Cancel</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Joint Control</h2>
+      <div id="joints"></div>
+      <div id="torque-bar" class="torque-status torque-off">TORQUE OFF</div>
+    </div>
+    <div class="card">
+      <h2>Torque</h2>
+      <div class="btn-row">
+        <button class="btn btn-green" onclick="torque(true)">ON</button>
+        <button class="btn btn-red" onclick="torque(false)">OFF</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Gripper</h2>
+      <div class="btn-row">
+        <button class="btn btn-green" onclick="grip(100)">Open</button>
+        <button class="btn btn-red" onclick="grip(0)">Close</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Presets</h2>
+      <div class="btn-row">
+        <button class="btn btn-blue" onclick="preset('home')">Home</button>
+        <button class="btn btn-blue" onclick="preset('ready')">Ready</button>
+        <button class="btn btn-blue" onclick="preset('default')">Default</button>
+        <button class="btn btn-blue" onclick="preset('rest')">Rest</button>
+      </div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn btn-orange" onclick="preset('drop')">Drop</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Direction Control</h2>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        <button class="btn btn-blue" style="width:80px" onclick="moveDir('forward')">Fwd</button>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-blue" style="width:80px" onclick="moveDir('left')">Left</button>
+          <button class="btn btn-blue" style="width:80px" onclick="moveDir('right')">Right</button>
+        </div>
+        <button class="btn btn-blue" style="width:80px" onclick="moveDir('backward')">Bwd</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:6px;border-top:1px solid #2a2a2a">
+        <span style="font-size:11px;color:#666;flex:1">Step:</span>
+        <select id="dir-step" style="background:#222;border:1px solid #444;border-radius:4px;color:#eee;font-size:11px;padding:2px 4px">
+          <option value="1">1&deg;</option>
+          <option value="3">3&deg;</option>
+          <option value="5" selected>5&deg;</option>
+          <option value="10">10&deg;</option>
+          <option value="15">15&deg;</option>
+          <option value="20">20&deg;</option>
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Teleop</h2>
+      <div id="teleop-bar" class="torque-status teleop-off">TELEOP OFF</div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn btn-green" onclick="teleopCtl('start')">Start</button>
+        <button class="btn btn-red" onclick="teleopCtl('stop')">Stop</button>
+      </div>
+    </div>
+    <button class="adv-toggle" onclick="toggleAdv()"><span id="adv-arrow">&#9654;</span> Advanced</button>
+    <div class="adv-panel" id="adv-panel">
+      <div class="adv-section">
+        <h3>Connections</h3>
+        <div class="adv-row"><span class="adv-label">Follower Arm</span><span class="adv-val" id="adv-follower">--</span></div>
+        <div class="adv-row"><span class="adv-label">Follower Port</span><span class="adv-val off" id="adv-fport">--</span></div>
+        <div class="adv-row"><span class="adv-label">Leader Arm</span><span class="adv-val" id="adv-leader">--</span></div>
+        <div class="adv-row"><span class="adv-label">Leader Port</span><span class="adv-val off" id="adv-lport">--</span></div>
+        <div class="adv-row"><span class="adv-label">Top Camera</span><span class="adv-val" id="adv-topcam">--</span></div>
+        <div class="adv-row"><span class="adv-label">Wrist Camera</span><span class="adv-val" id="adv-wristcam">--</span></div>
+      </div>
+      <div class="adv-section">
+        <h3>Rates</h3>
+        <div class="adv-row"><span class="adv-label">Teleop FPS</span><span class="adv-val" id="adv-teleop-fps">--</span></div>
+        <div class="adv-row"><span class="adv-label">Camera FPS</span><span class="adv-val" id="adv-cam-fps">--</span></div>
+      </div>
+      <div class="adv-section">
+        <h3>Calibration</h3>
+        <div class="adv-row">
+          <span class="adv-label">Floor Drop</span>
+          <span style="display:flex;gap:4px;align-items:center">
+            <input class="adv-input" id="adv-calib-val" type="number" step="0.1" placeholder="--">
+            <span class="adv-label">&deg;</span>
+            <button class="adv-btn" onclick="setCalib()">Set</button>
+          </span>
+        </div>
+        <div class="btn-row" style="margin-top:6px">
+          <button class="btn btn-blue" style="font-size:11px;padding:4px" onclick="sendChat2('/calib')">Calibrate</button>
+          <button class="btn btn-red" style="font-size:11px;padding:4px" onclick="clearCalib()">Clear</button>
+        </div>
+      </div>
+      <div class="adv-section">
+        <h3>Agent Activity Log</h3>
+        <div class="adv-log" id="adv-log"></div>
+      </div>
+      <div class="adv-section" id="adv-leader-joints-section" style="display:none">
+        <h3>Leader Joints</h3>
+        <div id="adv-leader-joints"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const JOINT_ORDER=['shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll','gripper'];
+const SHORT={shoulder_pan:'Pan',shoulder_lift:'Lift',elbow_flex:'Elbow',wrist_flex:'Flex',wrist_roll:'Roll',gripper:'Grip'};
+const PHASE_LABELS={idle:'Idle',calibrating:'Calibrating',homing:'Homing',prescan:'Scanning',aligning:'Aligning',
+  waiting_confirm:'Waiting for Confirm',lowering:'Lowering',gripping:'Gripping',lifting:'Lifting',
+  dropping:'Dropping',done:'Done'};
+const JOINT_RANGES={shoulder_pan:[-150,150],shoulder_lift:[-110,110],elbow_flex:[-110,110],
+  wrist_flex:[-110,110],wrist_roll:[-150,150],gripper:[0,100]};
+function post(url,body){fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
+function moveDir(dir){let deg=parseFloat(document.getElementById('dir-step').value)||5;post('/move_direction',{direction:dir,degrees:deg})}
+function torque(on){post('/enable',{enabled:on})}
+function grip(v){post('/move',{gripper:v})}
+function preset(p){post('/move_preset',{pose:p})}
+function teleopCtl(a){post('/teleop',{action:a})}
+function confirmGrip(v){post('/confirm_grip',{confirm:v})}
+function skipAlign(){post('/confirm_grip',{confirm:'done'})}
+function onSlider(joint){
+  let slider=document.getElementById('sld-'+joint);
+  let inp=document.getElementById('inp-'+joint);
+  let deg=document.getElementById('deg-'+joint);
+  if(!slider)return;
+  let v=parseFloat(slider.value);
+  if(inp)inp.value=v.toFixed(1);
+  if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
+  let cmd={};cmd[joint]=v;
+  post('/move',cmd);
+}
+function onInput(joint){
+  let inp=document.getElementById('inp-'+joint);
+  let slider=document.getElementById('sld-'+joint);
+  let deg=document.getElementById('deg-'+joint);
+  if(!inp)return;
+  let v=parseFloat(inp.value);
+  if(isNaN(v))return;
+  if(slider)slider.value=v;
+  if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
+  let cmd={};cmd[joint]=v;
+  post('/move',cmd);
+}
+function poll(){
+  fetch('/status').then(r=>r.json()).then(d=>{
+    document.getElementById('dot').className='status-dot ok';
+    document.getElementById('conn-text').textContent='Connected — arm '+(d.robot_connected?'online':'offline');
+    if(d.joints){
+      let container=document.getElementById('joints');
+      // Build rows only on first render
+      if(!container.dataset.init){
+        let h='';
+        for(let j of JOINT_ORDER){
+          let r=JOINT_RANGES[j]||[-150,150];
+          h+='<div class="joint-row">';
+          h+='<span class="joint-name">'+SHORT[j]+'</span>';
+          h+='<span class="joint-deg" id="deg-'+j+'">0.0\u00b0</span>';
+          h+='<input class="joint-slider" id="sld-'+j+'" type="range" min="'+r[0]+'" max="'+r[1]+'" step="0.5" value="0" oninput="onSlider(\''+j+'\')">';
+          h+='<input class="joint-input" id="inp-'+j+'" type="number" step="any" value="0" onkeydown="if(event.key===\'Enter\')onInput(\''+j+'\')" onchange="onInput(\''+j+'\')">';
+          h+='</div>';
+        }
+        container.innerHTML=h;
+        container.dataset.init='1';
+      }
+      // Update values only when neither input nor slider is being interacted with
+      for(let j of JOINT_ORDER){
+        let inp=document.getElementById('inp-'+j);
+        let sld=document.getElementById('sld-'+j);
+        let deg=document.getElementById('deg-'+j);
+        let k=Object.keys(d.joints).find(x=>x.replace('.pos','')==j);
+        let v=k?d.joints[k]:0;
+        if(typeof v!=='number')continue;
+        if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
+        if(sld&&document.activeElement!==sld)sld.value=v;
+        if(inp&&document.activeElement!==inp)inp.value=v.toFixed(1);
+      }
+    }
+    let tb=document.getElementById('torque-bar');
+    if(d.torque_enabled){tb.className='torque-status torque-on';tb.textContent='TORQUE ON'}
+    else{tb.className='torque-status torque-off';tb.textContent='TORQUE OFF'}
+    let tp=document.getElementById('teleop-bar');
+    if(d.teleop_active){tp.className='torque-status teleop-on';tp.textContent='TELEOP ACTIVE'}
+    else{tp.className='torque-status teleop-off';tp.textContent='TELEOP OFF'}
+    // Agent activity
+    let a=d.agent||{};
+    let phase=a.phase||'idle';
+    let badge=document.getElementById('phase-badge');
+    badge.className='phase-badge phase-'+phase;
+    badge.textContent=PHASE_LABELS[phase]||phase;
+    document.getElementById('activity-detail').textContent=a.detail||'';
+    // Progress bar for alignment
+    let prow=document.getElementById('progress-row');
+    if(phase==='aligning'&&a.align_max>0){
+      prow.style.display='flex';
+      let pct=Math.round((a.align_iteration/a.align_max)*100);
+      document.getElementById('progress-fill').style.width=pct+'%';
+      document.getElementById('progress-text').textContent=a.align_iteration+'/'+a.align_max;
+    }else{prow.style.display='none'}
+    // Confirm buttons
+    document.getElementById('confirm-section').style.display=a.confirm_pending?'flex':'none';
+    // Advanced panel
+    updateAdv(d);
+    // Timeline toggle
+    if(d.history_enabled!==undefined)tlUpdateToggle(d.history_enabled);
+  }).catch(()=>{
+    document.getElementById('dot').className='status-dot err';
+    document.getElementById('conn-text').textContent='Disconnected';
+  });
+}
+// Advanced panel
+let advOpen=false;
+let activityLog=[];
+function toggleAdv(){advOpen=!advOpen;document.getElementById('adv-panel').className=advOpen?'adv-panel show':'adv-panel';
+  document.getElementById('adv-arrow').innerHTML=advOpen?'&#9660;':'&#9654;';}
+function setCalib(){let v=parseFloat(document.getElementById('adv-calib-val').value);
+  if(!isNaN(v))post('/calibration',{floor_drop:v});}
+function clearCalib(){post('/calibration',{floor_drop:null});document.getElementById('adv-calib-val').value='';}
+function sendChat2(text){fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})})}
+function connBadge(connected,label){
+  if(connected===true)return '<span class="conn-badge connected">'+label+'</span>';
+  if(connected==='partial')return '<span class="conn-badge partial">'+label+'</span>';
+  return '<span class="conn-badge disconnected">'+label+'</span>';
+}
+function updateAdv(d){
+  if(!advOpen)return;
+  // Connections
+  document.getElementById('adv-follower').innerHTML=connBadge(d.robot_connected,d.robot_connected?'Connected':'Disconnected');
+  document.getElementById('adv-fport').textContent=d.robot_port||'--';
+  document.getElementById('adv-leader').innerHTML=connBadge(d.leader_connected,d.leader_connected?'Connected':'Disconnected');
+  document.getElementById('adv-lport').textContent=d.leader_port||'--';
+  let topOk=d.cameras&&d.cameras.indexOf('top')>=0;
+  let wristOk=d.cameras&&d.cameras.indexOf('wrist')>=0;
+  let topInfo=d.camera_info&&d.camera_info.top;
+  let wristInfo=d.camera_info&&d.camera_info.wrist;
+  document.getElementById('adv-topcam').innerHTML=connBadge(topOk,topOk?(topInfo?topInfo.name+' #'+topInfo.index:'Connected'):'Disconnected');
+  document.getElementById('adv-wristcam').innerHTML=connBadge(wristOk,wristOk?(wristInfo?wristInfo.name+' #'+wristInfo.index:'Connected'):'Disconnected');
+  // Rates
+  document.getElementById('adv-teleop-fps').textContent=d.teleop_active?(d.teleop_fps||60)+' hz':'--';
+  // Camera fps: estimate from history sample rate (joints update at camera rate)
+  let hLen=d.timestamp?Math.round(1/0.25)+'hz (poll)':'--';
+  document.getElementById('adv-cam-fps').textContent=d.cameras?d.cameras.length+' cams @ ~20fps':'--';
+  // Activity log
+  let a=d.agent||{};
+  let detail=a.detail||'';
+  if(detail&&(activityLog.length===0||activityLog[activityLog.length-1]!==detail)){
+    activityLog.push(detail);
+    if(activityLog.length>50)activityLog=activityLog.slice(-50);
+    let el=document.getElementById('adv-log');
+    el.textContent=activityLog.join('\n');
+    el.scrollTop=el.scrollHeight;
+  }
+  // Leader joints
+  let lsec=document.getElementById('adv-leader-joints-section');
+  if(d.leader_joints&&!d.leader_joints.error){
+    lsec.style.display='block';
+    let lc=document.getElementById('adv-leader-joints');
+    let h='';
+    for(let k in d.leader_joints){
+      let name=k.replace('.pos','');
+      let v=d.leader_joints[k];
+      if(typeof v==='number')v=v.toFixed(1);
+      h+='<div class="adv-row"><span class="adv-label">'+name+'</span><span class="adv-val">'+v+'&deg;</span></div>';
+    }
+    lc.innerHTML=h;
+  }else{lsec.style.display='none';}
+  // Calibration — read from status data
+  let ci=document.getElementById('adv-calib-val');
+  if(document.activeElement!==ci){
+    if(d.floor_drop!==null&&d.floor_drop!==undefined)ci.value=d.floor_drop;
+    else ci.value='';
+  }
+}
+poll();setInterval(poll,250);
+
+// ---- Chat ----
+let lastChatId=0;
+function sendChat(){
+  let inp=document.getElementById('chat-input');
+  let text=inp.value.trim();
+  if(!text)return;
+  inp.value='';
+  fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})});
+}
+function pollChat(){
+  fetch('/chat?since='+lastChatId).then(r=>r.json()).then(d=>{
+    let log=document.getElementById('chat-log');
+    let wasAtBottom=log.scrollHeight-log.scrollTop-log.clientHeight<30;
+    for(let m of d.messages){
+      if(m.id<=lastChatId)continue;
+      lastChatId=m.id;
+      let div=document.createElement('div');
+      div.className='chat-msg '+m.role;
+      // Strip ANSI codes for display
+      let clean=m.text.replace(/\x1b\[[0-9;]*m/g,'').replace(/\033\[[0-9;]*m/g,'');
+      div.textContent=clean;
+      if(m.source==='dashboard'&&m.role==='user'){
+        let src=document.createElement('div');
+        src.className='msg-source';src.textContent='from dashboard';
+        div.appendChild(src);
+      }
+      log.appendChild(div);
+    }
+    if(wasAtBottom&&d.messages.length>0)log.scrollTop=log.scrollHeight;
+  }).catch(()=>{});
+}
+pollChat();setInterval(pollChat,500);
+
+// ---- Timeline ----
+let tlData=[];let tlPlaying=false;let tlTimer=null;let tlPos=0;
+function tlLoad(){
+  fetch('/history').then(r=>r.json()).then(d=>{
+    tlData=d.data||[];
+    let slider=document.getElementById('tl-slider');
+    slider.max=Math.max(0,tlData.length-1);
+    if(!tlPlaying)slider.value=slider.max;
+    document.getElementById('tl-info').textContent=tlData.length+' samples';
+    if(!tlPlaying&&tlData.length>0)tlUpdateTime(tlData.length-1);
+  }).catch(()=>{});
+}
+function tlUpdateTime(idx){
+  if(idx<0||idx>=tlData.length)return;
+  let t0=tlData[0].t;
+  let elapsed=tlData[idx].t-t0;
+  let min=Math.floor(elapsed/60);
+  let sec=Math.floor(elapsed%60);
+  document.getElementById('tl-time').textContent=min+':'+(sec<10?'0':'')+sec;
+  // Update joint display to show historical values
+  let joints=tlData[idx].joints;
+  for(let j of JOINT_ORDER){
+    let deg=document.getElementById('deg-'+j);
+    let sld=document.getElementById('sld-'+j);
+    let inp=document.getElementById('inp-'+j);
+    let k=Object.keys(joints).find(x=>x.replace('.pos','')==j);
+    let v=k?joints[k]:0;
+    if(typeof v!=='number')continue;
+    if(deg)deg.textContent=v.toFixed(1)+'\u00b0';
+    if(sld&&document.activeElement!==sld)sld.value=v;
+    if(inp&&document.activeElement!==inp)inp.value=v.toFixed(1);
+  }
+}
+function tlSeek(val){
+  tlPos=parseInt(val);
+  tlUpdateTime(tlPos);
+}
+function tlToggle(){
+  if(tlPlaying){tlStop();return;}
+  if(tlData.length<2)return;
+  tlPlaying=true;
+  document.getElementById('tl-play').innerHTML='&#9646;&#9646;';
+  if(tlPos>=tlData.length-1)tlPos=0;
+  tlStep();
+}
+function tlStep(){
+  if(!tlPlaying||tlPos>=tlData.length-1){tlStop();return;}
+  let speed=parseFloat(document.getElementById('tl-speed').value)||1;
+  tlPos++;
+  document.getElementById('tl-slider').value=tlPos;
+  tlUpdateTime(tlPos);
+  // Move arm to this position
+  post('/history/goto',{joints:tlData[tlPos].joints});
+  // Calculate delay based on actual time diff and speed
+  let dt=500; // default
+  if(tlPos<tlData.length-1)dt=(tlData[tlPos+1].t-tlData[tlPos].t)*1000/speed;
+  dt=Math.max(16,Math.min(2000,dt));
+  tlTimer=setTimeout(tlStep,dt);
+}
+function tlStop(){
+  tlPlaying=false;
+  document.getElementById('tl-play').innerHTML='&#9654;';
+  if(tlTimer){clearTimeout(tlTimer);tlTimer=null;}
+}
+function tlGoTo(){
+  if(tlPos<0||tlPos>=tlData.length)return;
+  let joints=tlData[tlPos].joints;
+  post('/history/goto',{joints:joints});
+}
+function tlOnOff(){post('/timeline',{});}
+function tlUpdateToggle(enabled){
+  let btn=document.getElementById('tl-toggle');
+  if(enabled){btn.textContent='ON';btn.className='btn btn-green';btn.style.minWidth='40px';btn.style.padding='2px 8px';btn.style.fontSize='10px';btn.style.flex='0';}
+  else{btn.textContent='OFF';btn.className='btn btn-red';btn.style.minWidth='40px';btn.style.padding='2px 8px';btn.style.fontSize='10px';btn.style.flex='0';}
+}
+tlLoad();setInterval(tlLoad,5000);
+</script>
+</body></html>
