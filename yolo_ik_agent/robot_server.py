@@ -44,12 +44,16 @@ JPEG_QUALITY = 90
 CROSSHAIR_OFFSET_Y = 53  # pixels down from center (tune until dot matches gripper close point)
 CROSSHAIR_OFFSET_X = 30   # pixels right from center
 
-# Camera device indices — override with CAM_TOP / CAM_WRIST env vars
-# Or use CAM_TOP_NAME / CAM_WRIST_NAME to find cameras by device name
+# Camera device indices — override with CAM_TOP / CAM_WRIST / CAM_SIDE env vars
+# Or use CAM_TOP_NAME / CAM_WRIST_NAME / CAM_SIDE_NAME to find cameras by device name
 CAMERA_TOP_IDX = int(os.environ.get("CAM_TOP", "4"))
 CAMERA_WRIST_IDX = int(os.environ.get("CAM_WRIST", "0"))
-CAMERA_TOP_NAME = os.environ.get("CAM_TOP_NAME", "Logitech Webcam C930e")
+CAMERA_SIDE_IDX = int(os.environ.get("CAM_SIDE", "0"))
+CAMERA_TOP_NAME = os.environ.get("CAM_TOP_NAME", "HD Pro Webcam C920")
 CAMERA_WRIST_NAME = os.environ.get("CAM_WRIST_NAME", "USB2.0_CAM1")
+CAMERA_SIDE_NAME = os.environ.get("CAM_SIDE_NAME", "Logitech Webcam C930e")
+SNAPSHOT_SIDE_WIDTH = 640
+SNAPSHOT_SIDE_HEIGHT = 480
 
 # SO-101 port — looked up by USB serial number at startup
 # Override with ROBOT_PORT env var or --port CLI argument if needed
@@ -67,7 +71,7 @@ robot = None
 leader = None
 cameras = {}
 camera_info = {}  # {"top": {"name": ..., "index": ...}, "wrist": {...}}
-camera_locks = {"top": threading.Lock(), "wrist": threading.Lock()}
+camera_locks = {"top": threading.Lock(), "wrist": threading.Lock(), "side": threading.Lock()}
 robot_lock = threading.Lock()
 torque_enabled = False
 teleop_active = False
@@ -245,9 +249,14 @@ def init_cameras():
         wrist_idx = CAMERA_WRIST_IDX
         print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for wrist, using index {wrist_idx}")
 
+    side_idx = find_camera_index_by_name(CAMERA_SIDE_NAME) if CAMERA_SIDE_NAME else None
+    if side_idx is None:
+        side_idx = CAMERA_SIDE_IDX
+        print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for side, using index {side_idx}")
+
     # Auto-detect if resolved indices still don't open
     needs_autodetect = []
-    for name, idx in [("top", top_idx), ("wrist", wrist_idx)]:
+    for name, idx in [("top", top_idx), ("wrist", wrist_idx), ("side", side_idx)]:
         cap = cv2.VideoCapture(idx)
         ok = cap.isOpened()
         cap.release()
@@ -257,15 +266,18 @@ def init_cameras():
     if needs_autodetect:
         print(f"{C.YELLOW}[camera]{C.RESET} Could not open configured indices for {needs_autodetect}, auto-detecting...")
         available = autodetect_cameras()
-        if len(available) >= 2:
+        if len(available) >= 3:
+            top_idx, wrist_idx, side_idx = available[0], available[1], available[2]
+            print(f"{C.CYAN}[camera]{C.RESET} Using auto-detected: top={top_idx}, wrist={wrist_idx}, side={side_idx}")
+        elif len(available) >= 2:
             top_idx, wrist_idx = available[0], available[1]
             print(f"{C.CYAN}[camera]{C.RESET} Using auto-detected: top={top_idx}, wrist={wrist_idx}")
         elif len(available) == 1:
             top_idx = wrist_idx = available[0]
             print(f"{C.YELLOW}[camera]{C.RESET} Only one camera found (index {available[0]}), using for both")
 
-    cam_names = {"top": CAMERA_TOP_NAME, "wrist": CAMERA_WRIST_NAME}
-    for name, idx in [("top", top_idx), ("wrist", wrist_idx)]:
+    cam_names = {"top": CAMERA_TOP_NAME, "wrist": CAMERA_WRIST_NAME, "side": CAMERA_SIDE_NAME}
+    for name, idx in [("top", top_idx), ("wrist", wrist_idx), ("side", side_idx)]:
         # Open by device path with V4L2 backend for reliable high-res capture
         dev_path = f"/dev/video{idx}"
         cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
@@ -276,6 +288,10 @@ def init_cameras():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_TOP_WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_TOP_HEIGHT)
                 cap.set(cv2.CAP_PROP_SHARPNESS, 7)
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # autofocus on
+            elif name == "side":
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_SIDE_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_SIDE_HEIGHT)
                 cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # autofocus on
             else:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_WIDTH)
@@ -293,7 +309,7 @@ def reopen_camera(name):
     import cv2
     idx = camera_info.get(name, {}).get("index")
     if idx is None:
-        idx = CAMERA_WRIST_IDX if name == "wrist" else CAMERA_TOP_IDX
+        idx = {"wrist": CAMERA_WRIST_IDX, "side": CAMERA_SIDE_IDX}.get(name, CAMERA_TOP_IDX)
     print(f"{C.YELLOW}[camera]{C.RESET} {name} reopening index {idx}...")
     old = cameras.get(name)
     if old:
@@ -329,8 +345,12 @@ def capture_snapshot(name):
                 ret, frame = cam.read() if cam else (False, None)
             if not ret:
                 return None, f"Failed to read from {name} camera"
-    w = SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH
-    h = SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT
+    if name == "top":
+        w, h = SNAPSHOT_TOP_WIDTH, SNAPSHOT_TOP_HEIGHT
+    elif name == "side":
+        w, h = SNAPSHOT_SIDE_WIDTH, SNAPSHOT_SIDE_HEIGHT
+    else:
+        w, h = SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT
     frame = cv2.resize(frame, (w, h))
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
     _, buf = cv2.imencode(".jpg", frame, encode_params)
@@ -428,8 +448,12 @@ def mjpeg_generator(name):
             overlay_bytes = base64.b64decode(overlay_b64)
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + overlay_bytes + b"\r\n")
         else:
-            sw = SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH
-            sh = SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT
+            if name == "top":
+                sw, sh = SNAPSHOT_TOP_WIDTH, SNAPSHOT_TOP_HEIGHT
+            elif name == "side":
+                sw, sh = SNAPSHOT_SIDE_WIDTH, SNAPSHOT_SIDE_HEIGHT
+            else:
+                sw, sh = SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT
             frame = cv2.resize(frame, (sw, sh))
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
@@ -437,15 +461,15 @@ def mjpeg_generator(name):
 
 @app.route("/stream/<name>")
 def stream(name):
-    if name not in ["top", "wrist"]:
-        return jsonify({"error": "Unknown camera. Use 'top' or 'wrist'"}), 400
+    if name not in ["top", "wrist", "side"]:
+        return jsonify({"error": "Unknown camera. Use 'top', 'wrist', or 'side'"}), 400
     from flask import Response, stream_with_context
     return Response(stream_with_context(mjpeg_generator(name)),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 @app.route("/stream")
 def stream_index():
-    return render_template("stream.html")
+    return render_template("stream.html", camera_info=camera_info)
 
 
 @app.route("/dashboard")
@@ -555,16 +579,16 @@ def yolo_detect():
 
 @app.route("/snapshot/<name>")
 def snapshot(name):
-    if name not in ["top", "wrist"]:
-        return jsonify({"error": "Unknown camera. Use 'top' or 'wrist'"}), 400
+    if name not in ["top", "wrist", "side"]:
+        return jsonify({"error": "Unknown camera. Use 'top', 'wrist', or 'side'"}), 400
     b64, err = capture_snapshot(name)
     if err:
         return jsonify({"error": err}), 503
     return jsonify({
         "camera": name,
         "format": "jpeg",
-        "width": SNAPSHOT_TOP_WIDTH if name == "top" else SNAPSHOT_WIDTH,
-        "height": SNAPSHOT_TOP_HEIGHT if name == "top" else SNAPSHOT_HEIGHT,
+        "width": SNAPSHOT_TOP_WIDTH if name == "top" else (SNAPSHOT_SIDE_WIDTH if name == "side" else SNAPSHOT_WIDTH),
+        "height": SNAPSHOT_TOP_HEIGHT if name == "top" else (SNAPSHOT_SIDE_HEIGHT if name == "side" else SNAPSHOT_HEIGHT),
         "data": b64,
         "timestamp": time.time()
     })
@@ -694,6 +718,8 @@ def push_detection_overlay():
         detection_overlay["top"] = data["top"]
     if "wrist" in data:
         detection_overlay["wrist"] = data["wrist"]
+    if "side" in data:
+        detection_overlay["side"] = data["side"]
     detection_overlay["ts"] = time.time()
     return jsonify({"ok": True})
 
@@ -702,6 +728,7 @@ def clear_detection_overlay():
     """Clear the detection overlay."""
     detection_overlay["top"] = None
     detection_overlay["wrist"] = None
+    detection_overlay["side"] = None
     return jsonify({"ok": True})
 
 # ---- Command Execution (runs yolo_ik_agent commands from dashboard) ----
@@ -1188,7 +1215,7 @@ def run_diagnostics():
     errors = []
 
     # 1. Robot arm
-    print(f"  {C.BLUE}[1/4]{C.RESET} Robot arm............", end=" ")
+    print(f"  {C.BLUE}[1/5]{C.RESET} Robot arm............", end=" ")
     if robot is not None:
         try:
             with robot_lock:
@@ -1203,7 +1230,7 @@ def run_diagnostics():
         errors.append("Robot arm not connected (camera-only mode)")
 
     # 2. Torque
-    print(f"  {C.BLUE}[2/4]{C.RESET} Torque...............", end=" ")
+    print(f"  {C.BLUE}[2/5]{C.RESET} Torque...............", end=" ")
     if robot is not None:
         try:
             robot.bus.enable_torque()
@@ -1215,7 +1242,7 @@ def run_diagnostics():
         print(f"{C.YELLOW}SKIP{C.RESET} (no arm)")
 
     # 3. Top camera
-    print(f"  {C.BLUE}[3/4]{C.RESET} Top camera...........", end=" ")
+    print(f"  {C.BLUE}[3/5]{C.RESET} Top camera...........", end=" ")
     if "top" in cameras:
         import cv2
         cam = cameras["top"]
@@ -1233,7 +1260,7 @@ def run_diagnostics():
         errors.append("Top camera not available")
 
     # 4. Wrist camera
-    print(f"  {C.BLUE}[4/4]{C.RESET} Wrist camera.........", end=" ")
+    print(f"  {C.BLUE}[4/5]{C.RESET} Wrist camera.........", end=" ")
     if "wrist" in cameras:
         import cv2
         cam = cameras["wrist"]
@@ -1249,6 +1276,24 @@ def run_diagnostics():
     else:
         print(f"{C.RED}FAIL{C.RESET} — not available")
         errors.append("Wrist camera not available")
+
+    # 5. Side camera
+    print(f"  {C.BLUE}[5/5]{C.RESET} Side camera..........", end=" ")
+    if "side" in cameras:
+        import cv2
+        cam = cameras["side"]
+        for _ in range(4):
+            cam.grab()
+        ret, frame = cam.read()
+        if ret and frame is not None:
+            h, w = frame.shape[:2]
+            print(f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('side', {}).get('index', '?')})")
+        else:
+            print(f"{C.RED}FAIL{C.RESET} — opened but cannot read frames")
+            errors.append("Side camera opened but frame read failed")
+    else:
+        print(f"{C.RED}FAIL{C.RESET} — not available")
+        errors.append("Side camera not available")
 
     # Summary
     print()

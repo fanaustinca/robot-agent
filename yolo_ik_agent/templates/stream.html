@@ -52,7 +52,7 @@ button.active{background:#0f0}
 <div id="cmd-log" style="background:#16213e;padding:10px;border-radius:8px;margin-bottom:15px;display:none;max-height:200px;overflow-y:auto;font-size:13px"></div>
 <div class="container">
   <div class="cam">
-    <h2>Top Camera <span id="top-mode">(live)</span></h2>
+    <h2>Top Camera <span id="top-mode">(live)</span>: <span style="color:#888;font-weight:normal">{{ camera_info.get('top', {}).get('name', 'N/A') }}</span></h2>
     <div class="top-wrapper" id="top-wrapper">
       <img id="img-top-live" src="/stream/top">
       <img id="img-top-detect" style="display:none">
@@ -61,9 +61,13 @@ button.active{background:#0f0}
     <div class="roi-info" id="roi-info"></div>
   </div>
   <div class="cam">
-    <h2>Wrist Camera <span id="wrist-mode">(live)</span></h2>
+    <h2>Wrist Camera <span id="wrist-mode">(live)</span>: <span style="color:#888;font-weight:normal">{{ camera_info.get('wrist', {}).get('name', 'N/A') }}</span></h2>
     <img id="img-wrist-live" src="/stream/wrist">
     <img id="img-wrist-detect" style="display:none">
+  </div>
+  <div class="cam">
+    <h2>Side Camera <span id="side-mode">(live)</span>: <span style="color:#888;font-weight:normal">{{ camera_info.get('side', {}).get('name', 'N/A') }}</span></h2>
+    <img id="img-side-live" src="/stream/side">
   </div>
 </div>
 <div id="detections"><h2>Detections</h2><p>Enter a label and click Start Detecting.</p></div>
