@@ -28,6 +28,7 @@ button.active{background:#0f0}
 #roi-box .handle-tl{top:-7px;left:-7px;cursor:nwse-resize}
 #roi-box .handle-br{bottom:-7px;right:-7px;cursor:nwse-resize}
 .roi-info{color:#f0f;font-size:12px;margin-top:4px}
+.det-count{color:#ff0;font-size:13px;margin-top:4px}
 </style>
 </head><body>
 <h1>SO-101 YOLO Debug Viewer</h1>
@@ -61,13 +62,10 @@ button.active{background:#0f0}
     <div class="roi-info" id="roi-info"></div>
   </div>
   <div class="cam">
-    <h2>Wrist Camera <span id="wrist-mode">(live)</span>: <span style="color:#888;font-weight:normal">{{ camera_info.get('wrist', {}).get('name', 'N/A') }}</span></h2>
-    <img id="img-wrist-live" src="/stream/wrist">
-    <img id="img-wrist-detect" style="display:none">
-  </div>
-  <div class="cam">
     <h2>Side Camera <span id="side-mode">(live)</span>: <span style="color:#888;font-weight:normal">{{ camera_info.get('side', {}).get('name', 'N/A') }}</span></h2>
     <img id="img-side-live" src="/stream/side">
+    <img id="img-side-detect" style="display:none">
+    <div class="det-count" id="side-det-count"></div>
   </div>
 </div>
 <div id="detections"><h2>Detections</h2><p>Enter a label and click Start Detecting.</p></div>
@@ -123,9 +121,10 @@ function toggleDetect(){
     document.getElementById('img-top-live').style.display='block';
     document.getElementById('img-top-detect').style.display='none';
     document.getElementById('top-mode').innerText='(live)';
-    document.getElementById('img-wrist-live').style.display='block';
-    document.getElementById('img-wrist-detect').style.display='none';
-    document.getElementById('wrist-mode').innerText='(live)';
+    document.getElementById('img-side-live').style.display='block';
+    document.getElementById('img-side-detect').style.display='none';
+    document.getElementById('side-mode').innerText='(live)';
+    document.getElementById('side-det-count').innerText='';
     document.getElementById('status').innerText=''}
 }
 function runDetect(){
@@ -135,24 +134,37 @@ function runDetect(){
   if(roi)url+='&roi='+roi.x.toFixed(4)+','+roi.y.toFixed(4)+','+roi.w.toFixed(4)+','+roi.h.toFixed(4);
   document.getElementById('status').innerText='detecting...';
   fetch(url).then(r=>r.json()).then(data=>{
+    // Top camera
     document.getElementById('img-top-live').style.display='none';
     var d=document.getElementById('img-top-detect');
     d.src='data:image/jpeg;base64,'+data.image;d.style.display='block';
-    document.getElementById('top-mode').innerText='(YOLO)';
-    if(data.wrist_image){
-      document.getElementById('img-wrist-live').style.display='none';
-      var wd=document.getElementById('img-wrist-detect');
-      wd.src='data:image/jpeg;base64,'+data.wrist_image;wd.style.display='block';
-      document.getElementById('wrist-mode').innerText='(YOLO '+data.wrist_detections.length+')';
+    document.getElementById('top-mode').innerText='(YOLO '+data.detections.length+')';
+    // Side camera
+    if(data.side_image){
+      document.getElementById('img-side-live').style.display='none';
+      var sd=document.getElementById('img-side-detect');
+      sd.src='data:image/jpeg;base64,'+data.side_image;sd.style.display='block';
+      document.getElementById('side-mode').innerText='(YOLO '+data.side_detections.length+')';
+      document.getElementById('side-det-count').innerText=data.side_detections.length+' detection(s)';
     }
+    // Detections panel
     var html='<h2>Detections</h2>';
-    if(data.detections.length===0)html+='<p style="color:#ff0">No objects detected</p>';
-    data.detections.forEach(function(det){
-      html+='<div class="det"><span class="label">'+det.label+'</span> <span class="conf">'+(det.confidence*100).toFixed(0)+'%</span> <span class="pos">pixel ('+det.center[0].toFixed(0)+', '+det.center[1].toFixed(0)+')</span></div>';
-    });
+    if(data.detections.length===0&&data.side_detections.length===0)html+='<p style="color:#ff0">No objects detected</p>';
+    if(data.detections.length>0){
+      html+='<h3 style="color:#0af;margin:8px 0 4px">Top Camera ('+data.detections.length+')</h3>';
+      data.detections.forEach(function(det){
+        html+='<div class="det"><span class="label">'+det.label+'</span> <span class="conf">'+(det.confidence*100).toFixed(0)+'%</span> <span class="pos">pixel ('+det.center[0].toFixed(0)+', '+det.center[1].toFixed(0)+')</span></div>';
+      });
+    }
+    if(data.side_detections&&data.side_detections.length>0){
+      html+='<h3 style="color:#0af;margin:8px 0 4px">Side Camera ('+data.side_detections.length+')</h3>';
+      data.side_detections.forEach(function(det){
+        html+='<div class="det"><span class="label">'+det.label+'</span> <span class="conf">'+(det.confidence*100).toFixed(0)+'%</span> <span class="pos">pixel ('+det.center[0].toFixed(0)+', '+det.center[1].toFixed(0)+')</span></div>';
+      });
+    }
     if(data.position){html+='<div class="coords"><br>3D Position:<br>right = '+data.position[0].toFixed(1)+' cm<br>fwd = '+data.position[1].toFixed(1)+' cm<br>up = '+data.position[2].toFixed(1)+' cm</div>'}
     document.getElementById('detections').innerHTML=html;
-    document.getElementById('status').innerText=data.detections.length+' found';
+    document.getElementById('status').innerText=(data.detections.length+((data.side_detections||[]).length))+' found';
     if(detecting)timer=setTimeout(runDetect,100);
   }).catch(function(){document.getElementById('status').innerText='error';if(detecting)timer=setTimeout(runDetect,500)});
 }
@@ -175,6 +187,8 @@ var cmdCommands=[
   {cmd:'/gripper close',desc:'Close gripper'},
   {cmd:'/pos ',desc:'Move gripper to object without picking up (e.g. /pos red block)'},
   {cmd:'/calibrate_surface ',desc:'Calibrate surface height (e.g. /calibrate_surface red block)'},
+  {cmd:'/autofocus',desc:'Auto-focus all cameras and save focus values'},
+  {cmd:'/calib_ex ',desc:'Extrinsic calibration — /calib_ex <right_cm> <fwd_cm> | solve | clear | status'},
 ];
 var cmdSelIdx=-1;
 function cmdAutocomplete(){
@@ -226,7 +240,9 @@ function toggleHelp(){
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/drop</td><td style="color:#888;padding:4px">Move to drop position</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/gripper open</td><td style="color:#888;padding:4px">Open the gripper</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/gripper close</td><td style="color:#888;padding:4px">Close the gripper</td></tr>'+
-    '<tr><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calibrate_surface</td><td style="color:#888;padding:4px">Calibrate table/surface height using stereo</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calibrate_surface</td><td style="color:#888;padding:4px">Calibrate table/surface height using stereo</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/autofocus</td><td style="color:#888;padding:4px">Auto-focus all cameras and save values</td></tr>'+
+    '<tr><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calib_ex &lt;r&gt; &lt;f&gt;</td><td style="color:#888;padding:4px">Extrinsic calibration (solve | clear | status)</td></tr>'+
     '</table>'+
     '<h3 style="color:#0ff;margin:12px 0 8px">Examples (click to fill)</h3>'+
     '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">pick up red block</div>'+

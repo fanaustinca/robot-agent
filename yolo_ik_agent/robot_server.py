@@ -7,8 +7,8 @@ Usage:
 
 Endpoints:
     GET  /status              - arm joint positions + server health
-    GET  /snapshot/wrist      - base64 JPEG from wrist camera
     GET  /snapshot/top        - base64 JPEG from top camera
+    GET  /snapshot/side       - base64 JPEG from side camera
     POST /move                - move joints {joint_name: degrees, ...}
     POST /move_preset         - move to named pose (home, ready, rest)
     POST /enable              - enable/disable torque {"enabled": true/false}
@@ -36,24 +36,32 @@ class C:
 
 # ---- Config ----
 PORT = 7878
-SNAPSHOT_WIDTH = 640
-SNAPSHOT_HEIGHT = 480
-SNAPSHOT_TOP_WIDTH = 1920
-SNAPSHOT_TOP_HEIGHT = 1080
 JPEG_QUALITY = 90
 CROSSHAIR_OFFSET_Y = 53  # pixels down from center (tune until dot matches gripper close point)
 CROSSHAIR_OFFSET_X = 30   # pixels right from center
 
-# Camera device indices — override with CAM_TOP / CAM_WRIST / CAM_SIDE env vars
-# Or use CAM_TOP_NAME / CAM_WRIST_NAME / CAM_SIDE_NAME to find cameras by device name
+# Camera device indices — override with CAM_TOP / CAM_SIDE env vars
+# Or use CAM_TOP_NAME / CAM_SIDE_NAME to find cameras by device name
 CAMERA_TOP_IDX = int(os.environ.get("CAM_TOP", "4"))
-CAMERA_WRIST_IDX = int(os.environ.get("CAM_WRIST", "0"))
 CAMERA_SIDE_IDX = int(os.environ.get("CAM_SIDE", "0"))
 CAMERA_TOP_NAME = os.environ.get("CAM_TOP_NAME", "HD Pro Webcam C920")
-CAMERA_WRIST_NAME = os.environ.get("CAM_WRIST_NAME", "USB2.0_CAM1")
 CAMERA_SIDE_NAME = os.environ.get("CAM_SIDE_NAME", "Logitech Webcam C930e")
-SNAPSHOT_SIDE_WIDTH = 640
-SNAPSHOT_SIDE_HEIGHT = 480
+
+# Camera resolutions loaded from cameras.json (single source of truth)
+camera_resolutions = {}
+try:
+    import json as _json
+    _cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
+    with open(_cam_json_path) as _f:
+        _cam_data = _json.load(_f)
+    for _name in ("top", "side"):
+        if _name in _cam_data and "resolution" in _cam_data[_name]:
+            camera_resolutions[_name] = tuple(_cam_data[_name]["resolution"])
+except Exception:
+    pass
+# Fallback defaults if cameras.json is missing
+camera_resolutions.setdefault("top", (640, 480))
+camera_resolutions.setdefault("side", (640, 480))
 
 # SO-101 port — looked up by USB serial number at startup
 # Override with ROBOT_PORT env var or --port CLI argument if needed
@@ -70,8 +78,8 @@ app = Flask(__name__)
 robot = None
 leader = None
 cameras = {}
-camera_info = {}  # {"top": {"name": ..., "index": ...}, "wrist": {...}}
-camera_locks = {"top": threading.Lock(), "wrist": threading.Lock(), "side": threading.Lock()}
+camera_info = {}  # {"top": {"name": ..., "index": ...}, "side": {...}}
+camera_locks = {"top": threading.Lock(), "side": threading.Lock()}
 robot_lock = threading.Lock()
 torque_enabled = False
 teleop_active = False
@@ -119,8 +127,8 @@ agent_state = {
 }
 
 # ---- Detection Overlay (agent pushes annotated frames to show on stream) ----
-# {"top": base64_jpeg or None, "wrist": base64_jpeg or None, "ts": float}
-detection_overlay = {"top": None, "wrist": None, "ts": 0}
+# {"top": base64_jpeg or None, "side": base64_jpeg or None, "ts": float}
+detection_overlay = {"top": None, "side": None, "ts": 0}
 
 # ---- Chat Log (synced between CLI agent and dashboard) ----
 # Each entry: {"role": "user"|"agent"|"system", "text": str, "ts": float, "id": int}
@@ -236,18 +244,25 @@ def init_robot():
         robot = None
 
 def init_cameras():
-    import cv2
+    import cv2, json
+
+    # Load saved focus values from cameras.json
+    saved_focus = {}
+    try:
+        cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
+        with open(cam_json_path, "r") as f:
+            cam_data = json.load(f)
+        for cam_name in ("top", "side"):
+            if cam_name in cam_data and "focus" in cam_data[cam_name]:
+                saved_focus[cam_name] = cam_data[cam_name]["focus"]
+    except Exception:
+        pass
 
     # Resolve indices by name first, fall back to configured index, then auto-detect
     top_idx = find_camera_index_by_name(CAMERA_TOP_NAME) if CAMERA_TOP_NAME else None
     if top_idx is None:
         top_idx = CAMERA_TOP_IDX
         print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for top, using index {top_idx}")
-
-    wrist_idx = find_camera_index_by_name(CAMERA_WRIST_NAME) if CAMERA_WRIST_NAME else None
-    if wrist_idx is None:
-        wrist_idx = CAMERA_WRIST_IDX
-        print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for wrist, using index {wrist_idx}")
 
     side_idx = find_camera_index_by_name(CAMERA_SIDE_NAME) if CAMERA_SIDE_NAME else None
     if side_idx is None:
@@ -256,7 +271,7 @@ def init_cameras():
 
     # Auto-detect if resolved indices still don't open
     needs_autodetect = []
-    for name, idx in [("top", top_idx), ("wrist", wrist_idx), ("side", side_idx)]:
+    for name, idx in [("top", top_idx), ("side", side_idx)]:
         cap = cv2.VideoCapture(idx)
         ok = cap.isOpened()
         cap.release()
@@ -266,36 +281,35 @@ def init_cameras():
     if needs_autodetect:
         print(f"{C.YELLOW}[camera]{C.RESET} Could not open configured indices for {needs_autodetect}, auto-detecting...")
         available = autodetect_cameras()
-        if len(available) >= 3:
-            top_idx, wrist_idx, side_idx = available[0], available[1], available[2]
-            print(f"{C.CYAN}[camera]{C.RESET} Using auto-detected: top={top_idx}, wrist={wrist_idx}, side={side_idx}")
-        elif len(available) >= 2:
-            top_idx, wrist_idx = available[0], available[1]
-            print(f"{C.CYAN}[camera]{C.RESET} Using auto-detected: top={top_idx}, wrist={wrist_idx}")
+        if len(available) >= 2:
+            top_idx, side_idx = available[0], available[1]
+            print(f"{C.CYAN}[camera]{C.RESET} Using auto-detected: top={top_idx}, side={side_idx}")
         elif len(available) == 1:
-            top_idx = wrist_idx = available[0]
-            print(f"{C.YELLOW}[camera]{C.RESET} Only one camera found (index {available[0]}), using for both")
+            top_idx = available[0]
+            print(f"{C.YELLOW}[camera]{C.RESET} Only one camera found (index {available[0]}), using for top")
 
-    cam_names = {"top": CAMERA_TOP_NAME, "wrist": CAMERA_WRIST_NAME, "side": CAMERA_SIDE_NAME}
-    for name, idx in [("top", top_idx), ("wrist", wrist_idx), ("side", side_idx)]:
+    cam_names = {"top": CAMERA_TOP_NAME, "side": CAMERA_SIDE_NAME}
+    for name, idx in [("top", top_idx), ("side", side_idx)]:
         # Open by device path with V4L2 backend for reliable high-res capture
         dev_path = f"/dev/video{idx}"
         cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
         if cap.isOpened():
             # FOURCC must be set first, then resolution
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            res_w, res_h = camera_resolutions.get(name, (640, 480))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
             if name == "top":
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_TOP_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_TOP_HEIGHT)
                 cap.set(cv2.CAP_PROP_SHARPNESS, 7)
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # autofocus on
-            elif name == "side":
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_SIDE_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_SIDE_HEIGHT)
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # autofocus on
+            if name in saved_focus:
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                cap.set(cv2.CAP_PROP_FOCUS, saved_focus[name])
+                print(f"{C.CYAN}[camera]{C.RESET} {name} using saved focus={saved_focus[name]}")
+            elif name == "top":
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
             else:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, SNAPSHOT_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SNAPSHOT_HEIGHT)
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                cap.set(cv2.CAP_PROP_FOCUS, 60)
             actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             cameras[name] = cap
@@ -309,7 +323,7 @@ def reopen_camera(name):
     import cv2
     idx = camera_info.get(name, {}).get("index")
     if idx is None:
-        idx = {"wrist": CAMERA_WRIST_IDX, "side": CAMERA_SIDE_IDX}.get(name, CAMERA_TOP_IDX)
+        idx = CAMERA_SIDE_IDX if name == "side" else CAMERA_TOP_IDX
     print(f"{C.YELLOW}[camera]{C.RESET} {name} reopening index {idx}...")
     old = cameras.get(name)
     if old:
@@ -345,12 +359,7 @@ def capture_snapshot(name):
                 ret, frame = cam.read() if cam else (False, None)
             if not ret:
                 return None, f"Failed to read from {name} camera"
-    if name == "top":
-        w, h = SNAPSHOT_TOP_WIDTH, SNAPSHOT_TOP_HEIGHT
-    elif name == "side":
-        w, h = SNAPSHOT_SIDE_WIDTH, SNAPSHOT_SIDE_HEIGHT
-    else:
-        w, h = SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT
+    w, h = camera_resolutions.get(name, (640, 480))
     frame = cv2.resize(frame, (w, h))
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
     _, buf = cv2.imencode(".jpg", frame, encode_params)
@@ -448,12 +457,7 @@ def mjpeg_generator(name):
             overlay_bytes = base64.b64decode(overlay_b64)
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + overlay_bytes + b"\r\n")
         else:
-            if name == "top":
-                sw, sh = SNAPSHOT_TOP_WIDTH, SNAPSHOT_TOP_HEIGHT
-            elif name == "side":
-                sw, sh = SNAPSHOT_SIDE_WIDTH, SNAPSHOT_SIDE_HEIGHT
-            else:
-                sw, sh = SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT
+            sw, sh = camera_resolutions.get(name, (640, 480))
             frame = cv2.resize(frame, (sw, sh))
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
@@ -461,8 +465,8 @@ def mjpeg_generator(name):
 
 @app.route("/stream/<name>")
 def stream(name):
-    if name not in ["top", "wrist", "side"]:
-        return jsonify({"error": "Unknown camera. Use 'top', 'wrist', or 'side'"}), 400
+    if name not in ["top", "side"]:
+        return jsonify({"error": "Unknown camera. Use 'top' or 'side'"}), 400
     from flask import Response, stream_with_context
     return Response(stream_with_context(mjpeg_generator(name)),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
@@ -496,8 +500,9 @@ def yolo_detect():
 
     # Lazy-load YOLO
     from detect import detect_objects, annotate_frame
-    from camera_calibration import load_calibration, pixel_to_table_ray
-    from config import GRIPPER_CLEARANCE, TOP_CALIB_FILE
+    from camera_calibration import pixel_to_table_ray
+    from cameras import get_scaled_intrinsics, get_extrinsics, get_intrinsics
+    from config import GRIPPER_CLEARANCE
 
     # Parse ROI
     roi_px = None
@@ -534,61 +539,52 @@ def yolo_detect():
     # Compute 3D position
     position = None
     if dets:
-        top_matrix, top_dist, calib_res = load_calibration(TOP_CALIB_FILE)
-        if top_matrix is not None:
-            # Scale calibration if frame resolution differs
-            if calib_res is not None:
-                calib_w, calib_h = calib_res
-                if w != calib_w or h != calib_h:
-                    sx, sy = w / calib_w, h / calib_h
-                    top_matrix = top_matrix.copy()
-                    top_matrix[0, 0] *= sx
-                    top_matrix[0, 2] *= sx
-                    top_matrix[1, 1] *= sy
-                    top_matrix[1, 2] *= sy
-            from yolo_ik_agent import get_top_camera_extrinsics
-            cam_pos, cam_rot = get_top_camera_extrinsics()
+        try:
+            top_matrix, top_dist = get_scaled_intrinsics("top", w, h)
+            cam_pos, cam_rot = get_extrinsics("top")
             point = pixel_to_table_ray(dets[0]["center"], top_matrix, top_dist, cam_pos, cam_rot)
             if point is not None:
                 point[2] = GRIPPER_CLEARANCE
                 position = [round(point[0]*100, 1), round(point[1]*100, 1), round(point[2]*100, 1)]
                 cv2.putText(annotated, f"right={position[0]}cm fwd={position[1]}cm up={position[2]}cm",
                     (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+        except Exception:
+            pass
 
     _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
     img_b64 = base64.b64encode(buf.tobytes()).decode()
 
-    # Also run detection on wrist camera
-    wrist_b64 = None
-    wrist_dets = []
-    b64_wrist, werr = capture_snapshot("wrist")
-    if not werr:
-        wrist_bytes = base64.b64decode(b64_wrist)
-        wrist_array = np.frombuffer(wrist_bytes, dtype=np.uint8)
-        wrist_frame = cv2.imdecode(wrist_array, cv2.IMREAD_COLOR)
-        wrist_dets = detect_objects(wrist_frame, label)
-        wrist_annotated = annotate_frame(wrist_frame, wrist_dets)
-        _, wbuf = cv2.imencode(".jpg", wrist_annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        wrist_b64 = base64.b64encode(wbuf.tobytes()).decode()
+    # Also run detection on side camera
+    side_b64 = None
+    side_dets = []
+    b64_side, serr = capture_snapshot("side")
+    if not serr:
+        side_bytes = base64.b64decode(b64_side)
+        side_array = np.frombuffer(side_bytes, dtype=np.uint8)
+        side_frame = cv2.imdecode(side_array, cv2.IMREAD_COLOR)
+        side_dets = detect_objects(side_frame, label)
+        side_annotated = annotate_frame(side_frame, side_dets)
+        _, sbuf = cv2.imencode(".jpg", side_annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        side_b64 = base64.b64encode(sbuf.tobytes()).decode()
 
     return jsonify({
         "detections": dets, "image": img_b64, "position": position,
-        "wrist_detections": wrist_dets, "wrist_image": wrist_b64,
+        "side_detections": side_dets, "side_image": side_b64,
     })
 
 
 @app.route("/snapshot/<name>")
 def snapshot(name):
-    if name not in ["top", "wrist", "side"]:
-        return jsonify({"error": "Unknown camera. Use 'top', 'wrist', or 'side'"}), 400
+    if name not in ["top", "side"]:
+        return jsonify({"error": "Unknown camera. Use 'top' or 'side'"}), 400
     b64, err = capture_snapshot(name)
     if err:
         return jsonify({"error": err}), 503
     return jsonify({
         "camera": name,
         "format": "jpeg",
-        "width": SNAPSHOT_TOP_WIDTH if name == "top" else (SNAPSHOT_SIDE_WIDTH if name == "side" else SNAPSHOT_WIDTH),
-        "height": SNAPSHOT_TOP_HEIGHT if name == "top" else (SNAPSHOT_SIDE_HEIGHT if name == "side" else SNAPSHOT_HEIGHT),
+        "width": camera_resolutions.get(name, (640, 480))[0],
+        "height": camera_resolutions.get(name, (640, 480))[1],
         "data": b64,
         "timestamp": time.time()
     })
@@ -716,8 +712,6 @@ def push_detection_overlay():
     data = request.json or {}
     if "top" in data:
         detection_overlay["top"] = data["top"]
-    if "wrist" in data:
-        detection_overlay["wrist"] = data["wrist"]
     if "side" in data:
         detection_overlay["side"] = data["side"]
     detection_overlay["ts"] = time.time()
@@ -727,7 +721,6 @@ def push_detection_overlay():
 def clear_detection_overlay():
     """Clear the detection overlay."""
     detection_overlay["top"] = None
-    detection_overlay["wrist"] = None
     detection_overlay["side"] = None
     return jsonify({"ok": True})
 
@@ -735,6 +728,26 @@ def clear_detection_overlay():
 import threading
 _cmd_state = {"running": False, "command": "", "status": "idle", "log": []}
 _cmd_lock = threading.Lock()
+
+# Extrinsic calibration sample accumulator
+# Each entry: {"world": [right, fwd, z], "pixels": {"top": (u,v), "side": (u,v)}}
+_CALIB_EX_FILE = os.path.join(os.path.dirname(__file__), "calibration_data", "calib_ex_samples.json")
+
+def _load_calib_ex_samples():
+    import json
+    try:
+        with open(_CALIB_EX_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def _save_calib_ex_samples():
+    import json
+    with open(_CALIB_EX_FILE, "w") as f:
+        json.dump(_calib_ex_samples, f, indent=2)
+        f.write("\n")
+
+_calib_ex_samples = _load_calib_ex_samples()
 
 def _run_command_thread(command):
     """Execute a yolo_ik_agent command in a background thread."""
@@ -904,6 +917,266 @@ def _run_command_thread(command):
                     log(f"[cmd] Done — check gripper alignment")
                 else:
                     log("[cmd] Object not found")
+        elif lower.startswith("/autofocus"):
+            import cv2, numpy as np
+            import time as _time
+            import json, os
+
+            # Sweep focus 0-255 in steps, measure sharpness, pick the best
+            step = 5
+            settle_frames = 4  # frames to skip after changing focus to let it settle
+
+            def measure_sharpness(cap):
+                """Read a frame and return Laplacian variance (higher = sharper)."""
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    return 0.0
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+            focus_results = {}
+            for cam_name, cap in cameras.items():
+                if not (cap and cap.isOpened()):
+                    continue
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                log(f"[cmd] {cam_name}: sweeping focus 0-255 (step={step})...")
+                best_focus = 0
+                best_sharpness = 0.0
+                for fv in range(0, 256, step):
+                    cap.set(cv2.CAP_PROP_FOCUS, fv)
+                    # Burn frames so the lens physically moves
+                    for _ in range(settle_frames):
+                        cap.read()
+                    sharpness = measure_sharpness(cap)
+                    if sharpness > best_sharpness:
+                        best_sharpness = sharpness
+                        best_focus = fv
+                # Fine sweep around the best value
+                fine_lo = max(0, best_focus - step)
+                fine_hi = min(255, best_focus + step)
+                for fv in range(fine_lo, fine_hi + 1):
+                    cap.set(cv2.CAP_PROP_FOCUS, fv)
+                    for _ in range(settle_frames):
+                        cap.read()
+                    sharpness = measure_sharpness(cap)
+                    if sharpness > best_sharpness:
+                        best_sharpness = sharpness
+                        best_focus = fv
+                # Lock to best
+                cap.set(cv2.CAP_PROP_FOCUS, best_focus)
+                focus_results[cam_name] = best_focus
+                log(f"[cmd] {cam_name}: best focus={best_focus} (sharpness={best_sharpness:.0f})")
+
+            # Save to cameras.json
+            cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
+            try:
+                with open(cam_json_path, "r") as f:
+                    cam_data = json.load(f)
+                for cam_name, focus_val in focus_results.items():
+                    if cam_name in cam_data:
+                        cam_data[cam_name]["focus"] = focus_val
+                with open(cam_json_path, "w") as f:
+                    json.dump(cam_data, f, indent=2)
+                    f.write("\n")
+                log(f"[cmd] Saved focus values to cameras.json")
+            except Exception as e:
+                log(f"[cmd] Warning: could not save to cameras.json: {e}")
+            log("[cmd] Autofocus complete")
+        elif lower.startswith("/calib_ex"):
+            import cv2, numpy as np, json, os
+            from detect import detect_objects
+            from cameras import get_intrinsics, get_scaled_intrinsics, update_camera, reload as reload_cameras
+            from config import TABLE_Z
+
+            args_str = command.split(None, 1)[1].strip() if " " in command else ""
+            args_lower = args_str.lower()
+
+            if args_lower == "clear":
+                _calib_ex_samples.clear()
+                _save_calib_ex_samples()
+                log("[cmd] Cleared all extrinsic calibration samples")
+            elif args_lower.startswith("del"):
+                del_parts = args_str.split()
+                if len(del_parts) < 2:
+                    log("[cmd] Usage: /calib_ex del <number>")
+                else:
+                    try:
+                        idx = int(del_parts[1])
+                        if 1 <= idx <= len(_calib_ex_samples):
+                            removed = _calib_ex_samples.pop(idx - 1)
+                            _save_calib_ex_samples()
+                            w = removed["world"]
+                            log(f"[cmd] Deleted sample {idx} (right={w[0]*100:.1f}cm fwd={w[1]*100:.1f}cm). {len(_calib_ex_samples)} remaining.")
+                        else:
+                            log(f"[cmd] Invalid sample number. Have {len(_calib_ex_samples)} samples (1-{len(_calib_ex_samples)}).")
+                    except ValueError:
+                        log("[cmd] Usage: /calib_ex del <number>")
+            elif args_lower == "status":
+                log(f"[cmd] {len(_calib_ex_samples)} sample(s) collected")
+                for i, s in enumerate(_calib_ex_samples):
+                    w = s["world"]
+                    cams = ", ".join(f"{k}=({int(v[0])},{int(v[1])})" for k, v in s["pixels"].items())
+                    log(f"[cmd]   {i+1}: right={w[0]*100:.1f}cm fwd={w[1]*100:.1f}cm → {cams}")
+            elif args_lower == "solve":
+                if len(_calib_ex_samples) < 4:
+                    log(f"[cmd] Need at least 4 samples (have {len(_calib_ex_samples)}). Add more with /calib_ex <right_cm> <fwd_cm>")
+                else:
+                    log(f"[cmd] Solving extrinsics from {len(_calib_ex_samples)} samples...")
+                    for cam_name in ["top", "side"]:
+                        # Collect samples that have this camera
+                        cam_samples = [(s["world"], s["pixels"][cam_name])
+                                       for s in _calib_ex_samples if cam_name in s["pixels"]]
+                        if len(cam_samples) < 4:
+                            log(f"[cmd] {cam_name}: only {len(cam_samples)} samples, need 4+. Skipping.")
+                            continue
+
+                        world_pts = np.array([s[0] for s in cam_samples], dtype=np.float64)
+                        img_pts = np.array([s[1] for s in cam_samples], dtype=np.float64)
+
+                        # Get a snapshot to know actual frame size
+                        b64_frame, err = capture_snapshot(cam_name)
+                        if err:
+                            log(f"[cmd] {cam_name}: cannot get snapshot: {err}")
+                            continue
+                        img_bytes = base64.b64decode(b64_frame)
+                        frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                        fh, fw = frame.shape[:2]
+                        cam_matrix, cam_dist = get_scaled_intrinsics(cam_name, fw, fh)
+
+                        # solvePnP: try multiple methods, pick best
+                        best_rvec, best_tvec, best_err = None, None, float('inf')
+                        methods = [
+                            ("IPPE", cv2.SOLVEPNP_IPPE),
+                            ("ITERATIVE", cv2.SOLVEPNP_ITERATIVE),
+                            ("SQPNP", cv2.SOLVEPNP_SQPNP),
+                            ("EPNP", cv2.SOLVEPNP_EPNP),
+                        ]
+                        for method_name, method_flag in methods:
+                            try:
+                                ok, rv, tv = cv2.solvePnP(
+                                    world_pts.reshape(-1, 1, 3),
+                                    img_pts.reshape(-1, 1, 2),
+                                    cam_matrix, cam_dist,
+                                    flags=method_flag
+                                )
+                                if ok:
+                                    proj, _ = cv2.projectPoints(world_pts, rv, tv, cam_matrix, cam_dist)
+                                    err = np.mean(np.linalg.norm(proj.reshape(-1, 2) - img_pts, axis=1))
+                                    log(f"[cmd] {cam_name} {method_name}: {err:.1f}px reproj error")
+                                    if err < best_err:
+                                        best_err = err
+                                        best_rvec, best_tvec = rv, tv
+                            except Exception:
+                                pass
+
+                        if best_rvec is None:
+                            log(f"[cmd] {cam_name}: solvePnP failed!")
+                            continue
+
+                        # Refine
+                        try:
+                            best_rvec, best_tvec = cv2.solvePnPRefineVVS(
+                                world_pts.reshape(-1, 1, 3),
+                                img_pts.reshape(-1, 1, 2),
+                                cam_matrix, cam_dist,
+                                best_rvec, best_tvec
+                            )
+                        except Exception:
+                            pass
+
+                        # Extract camera position and orientation
+                        R_cam, _ = cv2.Rodrigues(best_rvec)
+                        cam_pos = (-R_cam.T @ best_tvec).flatten()
+                        R_world = R_cam.T
+                        optical_axis = R_world @ np.array([0.0, 0.0, 1.0])
+                        pitch_deg = float(np.degrees(np.arcsin(optical_axis[2])))
+                        yaw_deg = float(np.degrees(np.arctan2(optical_axis[0], optical_axis[1])))
+
+                        # Per-sample reprojection errors
+                        proj, _ = cv2.projectPoints(world_pts, best_rvec, best_tvec, cam_matrix, cam_dist)
+                        errors = np.linalg.norm(proj.reshape(-1, 2) - img_pts, axis=1)
+                        for i, e in enumerate(errors):
+                            marker = " *** OUTLIER" if e > 15 else ""
+                            log(f"[cmd]   sample {i+1}: {e:.1f}px{marker}")
+
+                        log(f"[cmd] {cam_name}: position right={cam_pos[0]*100:+.1f}cm fwd={cam_pos[1]*100:+.1f}cm up={cam_pos[2]*100:+.1f}cm")
+                        log(f"[cmd] {cam_name}: yaw={yaw_deg:.1f}° pitch={pitch_deg:.1f}° reproj={best_err:.1f}px")
+
+                        # Save
+                        update_camera(cam_name,
+                            position=cam_pos.tolist(),
+                            yaw=round(yaw_deg, 1),
+                            pitch=round(pitch_deg, 1),
+                        )
+                        log(f"[cmd] {cam_name}: saved to cameras.json")
+
+                    reload_cameras()
+                    log("[cmd] Extrinsic calibration complete")
+            elif args_str:
+                # Parse coordinates: /calib_ex <right_cm> <fwd_cm>
+                parts = args_str.split()
+                if len(parts) < 2:
+                    log("[cmd] Usage: /calib_ex <right_cm> <fwd_cm>")
+                    log("[cmd]   or: /calib_ex solve | clear | status")
+                else:
+                    try:
+                        right_m = float(parts[0]) / 100.0
+                        fwd_m = float(parts[1]) / 100.0
+                    except ValueError:
+                        log("[cmd] Invalid coordinates. Usage: /calib_ex <right_cm> <fwd_cm>")
+                        right_m = None
+
+                    if right_m is not None:
+                        world_pt = [right_m, fwd_m, TABLE_Z]
+                        log(f"[cmd] Detecting red block at right={right_m*100:.1f}cm fwd={fwd_m*100:.1f}cm...")
+                        sample = {"world": world_pt, "pixels": {}}
+
+                        for cam_name in ["top", "side"]:
+                            b64_frame, err = capture_snapshot(cam_name)
+                            if err:
+                                log(f"[cmd] {cam_name}: snapshot failed: {err}")
+                                continue
+                            img_bytes = base64.b64decode(b64_frame)
+                            frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+
+                            dets = detect_objects(frame, "red block")
+                            if not dets:
+                                log(f"[cmd] {cam_name}: no red block detected")
+                                continue
+
+                            # Use highest-confidence detection
+                            best = dets[0]
+                            cx, cy = best["center"]
+                            conf = best["confidence"]
+                            sample["pixels"][cam_name] = (float(cx), float(cy))
+                            log(f"[cmd] {cam_name}: detected at pixel ({int(cx)}, {int(cy)}) conf={conf:.2f}")
+
+                            # Draw detection on frame and push to overlay
+                            x1, y1, x2, y2 = [int(v) for v in best["bbox"]]
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.circle(frame, (int(cx), int(cy)), 5, (0, 0, 255), -1)
+                            label_text = f"red block ({conf:.0%}) #{len(_calib_ex_samples)+1}"
+                            cv2.putText(frame, label_text, (x1, y1 - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            _, overlay_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                            detection_overlay[cam_name] = base64.b64encode(overlay_buf.tobytes()).decode("utf-8")
+                            detection_overlay["ts"] = time.time()
+
+                        if sample["pixels"]:
+                            _calib_ex_samples.append(sample)
+                            _save_calib_ex_samples()
+                            log(f"[cmd] Sample {len(_calib_ex_samples)} added ({len(_calib_ex_samples)}/4 min). Samples:")
+                            for i, s in enumerate(_calib_ex_samples):
+                                w = s["world"]
+                                cams = ", ".join(f"{k}=({int(v[0])},{int(v[1])})" for k, v in s["pixels"].items())
+                                log(f"[cmd]   {i+1}: right={w[0]*100:.1f}cm fwd={w[1]*100:.1f}cm → {cams}")
+                        else:
+                            log("[cmd] No detections in any camera. Try repositioning the block.")
+            else:
+                log("[cmd] Usage: /calib_ex <right_cm> <fwd_cm>  — capture a sample")
+                log("[cmd]   /calib_ex solve   — compute extrinsics from samples")
+                log("[cmd]   /calib_ex clear   — reset all samples")
+                log("[cmd]   /calib_ex status  — show collected samples")
         elif lower.startswith("/calibrate_surface"):
             from yolo_ik_agent import calibrate_surface
             label = command.split(None, 1)[1] if " " in command else None
@@ -1215,7 +1488,7 @@ def run_diagnostics():
     errors = []
 
     # 1. Robot arm
-    print(f"  {C.BLUE}[1/5]{C.RESET} Robot arm............", end=" ")
+    print(f"  {C.BLUE}[1/4]{C.RESET} Robot arm............", end=" ")
     if robot is not None:
         try:
             with robot_lock:
@@ -1230,7 +1503,7 @@ def run_diagnostics():
         errors.append("Robot arm not connected (camera-only mode)")
 
     # 2. Torque
-    print(f"  {C.BLUE}[2/5]{C.RESET} Torque...............", end=" ")
+    print(f"  {C.BLUE}[2/4]{C.RESET} Torque...............", end=" ")
     if robot is not None:
         try:
             robot.bus.enable_torque()
@@ -1242,7 +1515,7 @@ def run_diagnostics():
         print(f"{C.YELLOW}SKIP{C.RESET} (no arm)")
 
     # 3. Top camera
-    print(f"  {C.BLUE}[3/5]{C.RESET} Top camera...........", end=" ")
+    print(f"  {C.BLUE}[3/4]{C.RESET} Top camera...........", end=" ")
     if "top" in cameras:
         import cv2
         cam = cameras["top"]
@@ -1259,26 +1532,8 @@ def run_diagnostics():
         print(f"{C.RED}FAIL{C.RESET} — not available")
         errors.append("Top camera not available")
 
-    # 4. Wrist camera
-    print(f"  {C.BLUE}[4/5]{C.RESET} Wrist camera.........", end=" ")
-    if "wrist" in cameras:
-        import cv2
-        cam = cameras["wrist"]
-        for _ in range(4):
-            cam.grab()
-        ret, frame = cam.read()
-        if ret and frame is not None:
-            h, w = frame.shape[:2]
-            print(f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('wrist', {}).get('index', '?')})")
-        else:
-            print(f"{C.RED}FAIL{C.RESET} — opened but cannot read frames")
-            errors.append("Wrist camera opened but frame read failed")
-    else:
-        print(f"{C.RED}FAIL{C.RESET} — not available")
-        errors.append("Wrist camera not available")
-
-    # 5. Side camera
-    print(f"  {C.BLUE}[5/5]{C.RESET} Side camera..........", end=" ")
+    # 4. Side camera
+    print(f"  {C.BLUE}[4/4]{C.RESET} Side camera..........", end=" ")
     if "side" in cameras:
         import cv2
         cam = cameras["side"]

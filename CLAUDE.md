@@ -42,6 +42,13 @@ Dashboard (live cameras + controls): http://localhost:7878/stream
 | `ANTHROPIC_API_KEY` | — | Required for claude agent |
 | `ROBOT_SERVER` | http://localhost:7878 | Server URL for agents |
 
+## Development Rules
+
+- **Dashboard command registration**: When adding a new `/command` to `_run_command_thread()` in `robot_server.py`, always update **both** of the following in `templates/stream.html`:
+  1. The `cmdCommands` array — for autocomplete suggestions
+  2. The `toggleHelp()` function's HTML table — for the Help button command list
+- **Detection overlay**: When a dashboard command detects objects in camera frames, always annotate the frame (bounding box, center dot, label with confidence) and push it to `detection_overlay` so the user can verify the detection on the live stream. The overlay auto-expires after 10 seconds.
+
 ## Key Details
 
 - **Joint space inversion**: Agent uses positive shoulder_lift = up; hardware inverts this. Conversion in `move_joints()` / `hardware_to_agent()`.
