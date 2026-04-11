@@ -28,48 +28,51 @@ import requests
 
 from config import (
     ROBOT_SERVER, TABLE_Z, GRIPPER_CLEARANCE, GRIPPER_APPROACH_HEIGHT,
-    CAM_TOP_WIDTH, CAM_TOP_HEIGHT, CAM_WRIST_WIDTH, CAM_WRIST_HEIGHT,
-    TOP_CAM_X, TOP_CAM_Y, TOP_CAM_Z, TOP_CAM_PITCH,
     URDF_BASE_OFFSET, C
 )
 from detect import detect_objects, detect_and_verify, find_object_pixel, annotate_frame, get_model
-from arm_kinematics import forward_kinematics, inverse_kinematics, get_wrist_camera_pose, get_chain
-from camera_calibration import load_calibration, pixel_to_table_ray, triangulate_point, TOP_CALIB_FILE, WRIST_CALIB_FILE
+from arm_kinematics import forward_kinematics, inverse_kinematics, get_chain
+from camera_calibration import pixel_to_table_ray
+from cameras import get_intrinsics, get_extrinsics, get_scaled_intrinsics
 
 
 # ---- Shared state ----
 SLOW_MOVE_STEPS = 20
 SLOW_MOVE_DELAY = 0.05
 
-# ---- Calibrated surface origin (object position becomes 0,0,0) ----
-SURFACE_CALIB_FILE = os.path.join(os.path.dirname(__file__), "calibration_data", "surface.json")
-_surface_origin = None  # [right, fwd, up] offset — detected position of calibration object
+# ---- Arm offset (camera/board frame → arm frame) ----
+# [right_m, fwd_m, height_m]: arm's position on the board and height above surface.
+# X,Y: subtracted from detected board-frame positions to get arm-frame coords.
+# Z: surface level in arm frame = -arm_offset[2] (replaces TABLE_Z / surface.json).
+_arm_offset = np.array([0.0, 0.0, 0.0])
 
-def _load_surface_calib():
-    """Load surface calibration from file if not already loaded."""
-    global _surface_origin
-    if _surface_origin is not None:
-        return
-    if os.path.exists(SURFACE_CALIB_FILE):
-        try:
-            with open(SURFACE_CALIB_FILE) as f:
-                data = json.load(f)
-            _surface_origin = np.array(data["origin"])
-            print(f"{C.GREEN}[calib]{C.RESET} Loaded surface origin: right={_surface_origin[0]*100:.1f}cm fwd={_surface_origin[1]*100:.1f}cm up={_surface_origin[2]*100:.1f}cm")
-        except Exception:
-            pass
+def _load_arm_offset():
+    """Load arm_offset from cameras.json if present."""
+    global _arm_offset
+    from cameras import CAMERAS_FILE
+    try:
+        with open(CAMERAS_FILE) as f:
+            data = json.load(f)
+        if "arm_offset" in data:
+            _arm_offset = np.array(data["arm_offset"][:3], dtype=float)
+            print(f"{C.GREEN}[calib]{C.RESET} Arm offset: right={_arm_offset[0]*100:.1f}cm fwd={_arm_offset[1]*100:.1f}cm up={_arm_offset[2]*100:.1f}cm")
+    except Exception:
+        pass
+
+_load_arm_offset()
 
 def get_surface_z():
-    """Get the calibrated surface Z, or TABLE_Z as fallback."""
-    _load_surface_calib()
-    if _surface_origin is not None:
-        return _surface_origin[2]
+    """Surface Z in arm frame. Arm is arm_offset[2] above the surface."""
+    if _arm_offset[2] != 0:
+        return -_arm_offset[2]
     return TABLE_Z
 
-def get_surface_origin():
-    """Get the calibrated surface origin [right, fwd, up], or None."""
-    _load_surface_calib()
-    return _surface_origin
+def board_to_arm(pos):
+    """Convert board-frame position to arm-frame by subtracting arm offset X,Y."""
+    result = pos.copy()
+    result[0] -= _arm_offset[0]
+    result[1] -= _arm_offset[1]
+    return result
 
 # ---- Coordinate transforms ----
 # Physical world: +X = right, +Y = forward, +Z = up (relative to arm base on table)
@@ -213,7 +216,7 @@ def get_joint_angles():
 # IK correction: URDF geometry doesn't perfectly match physical arm
 # Applied only to IK targets, not camera calculations
 IK_OFFSET_RIGHT = -0.01   # 1cm left of object
-IK_OFFSET_FWD = -0.025   # 1.5cm forward overshoot + 1cm behind object
+IK_OFFSET_FWD = 0.0
 IK_OFFSET_UP = 0.0
 
 def move_to_xyz(target_xyz, current_angles=None):
@@ -248,9 +251,17 @@ def move_to_xyz(target_xyz, current_angles=None):
     if error > 5.0:
         print(f"{C.YELLOW}[ik]{C.RESET} Warning: IK error is large ({error:.1f}cm) — solution may be inaccurate")
 
-    # Send to robot with smooth interpolation
+    # Move pan first (keep arm raised to avoid knocking objects), then lower
+    print(f"{C.DIM}[ik] Moving pan first...{C.RESET}")
+    result = _interpolate_move({"shoulder_pan": angles[0]})
+    if "error" in result:
+        print(f"{C.RED}[move]{C.RESET} Error: {result['error']}")
+        return None
+    time.sleep(0.2)
+
+    # Now move remaining joints to lower into position
+    print(f"{C.DIM}[ik] Lowering to position...{C.RESET}")
     joint_cmd = {
-        "shoulder_pan": angles[0],
         "shoulder_lift": angles[1],
         "elbow_flex": angles[2],
         "wrist_flex": angles[3],
@@ -264,90 +275,17 @@ def move_to_xyz(target_xyz, current_angles=None):
 
 
 def get_top_camera_extrinsics():
-    """Get the top camera's position and rotation in physical world frame.
-    Physical world: +X = right, +Y = forward, +Z = up.
-    Camera: +Z = into scene, +X = right in image, +Y = down in image.
-    Camera looks along +Y (forward) and pitched down by TOP_CAM_PITCH."""
-    position = np.array([TOP_CAM_X, TOP_CAM_Y, TOP_CAM_Z])
-    p = np.radians(TOP_CAM_PITCH)  # negative = looking downward
-    s, c = np.sin(p), np.cos(p)
-    # cam +Z → physical [0, c, s] (forward + down)
-    # cam +X → physical [1, 0, 0] (image right = physical right)
-    # cam +Y → physical [0, -s, c] ... computed as cross(Z,X)→ [0*s-s*0, s*1-0*0, 0*0-c*1] nah let me just derive:
-    # cam +Y = (cam +Z) × (cam +X) in physical frame:
-    #   [0,c,s] × [1,0,0] = [c*0-s*0, s*1-0*0, 0*0-c*1] = [0, s, -c]
-    rotation = np.array([
-        [1,  0,  0],
-        [0,  s,  c],
-        [0, -c,  s],
-    ])
-    return position, rotation
+    """Get the top camera's position and rotation from cameras.json."""
+    return get_extrinsics("top")
 
-
-def get_wrist_extrinsics_at(joint_angles):
-    """Get wrist camera position and rotation at given joint angles using FK."""
-    pos, rot = get_wrist_camera_pose(joint_angles)
-    return pos, rot
-
-
-def get_wrist_observe_extrinsics():
-    """Get the wrist camera's position and rotation at the /observe position.
-    Position: directly measured (more accurate than FK).
-    Rotation: from FK (joint lengths don't affect rotation, only position)."""
-    from config import WRIST_CAM_OBSERVE_X, WRIST_CAM_OBSERVE_Y, WRIST_CAM_OBSERVE_Z
-    position = np.array([WRIST_CAM_OBSERVE_X, WRIST_CAM_OBSERVE_Y, WRIST_CAM_OBSERVE_Z])
-    # Get rotation from FK — joint lengths affect position but not rotation
-    observe_angles = [-21.5, -42.2, -6.5, 96.1, -90.0]
-    _, rotation = get_wrist_camera_pose(observe_angles)
-    return position, rotation
-
-
-def calibrate_surface(target_label=None):
-    """Calibrate the surface origin using stereo from both cameras.
-    The detected object position becomes (0, 0, 0) for future commands.
-    If target_label is given, detects that specific object."""
-    global _surface_origin
-
-    label_str = f" ({target_label})" if target_label else ""
-    print(f"\n{C.BOLD}Surface Calibration{label_str}{C.RESET}")
-    print(f"  Place an object at the desired origin on the surface.\n")
-
-    # Use detect_and_locate with stereo to get the 3D position
-    pos = detect_and_locate(target_label, use_triangulation=True)
-    if pos is None:
-        print(f"{C.RED}[calib]{C.RESET} Could not detect object — calibration failed")
-        return None
-
-    # This position becomes the new origin
-    _surface_origin = pos.copy()
-
-    print(f"\n{C.GREEN}[calib]{C.RESET} Surface origin set:")
-    print(f"  right   = {pos[0]*100:.1f}cm")
-    print(f"  forward = {pos[1]*100:.1f}cm")
-    print(f"  up      = {pos[2]*100:.1f}cm")
-    print(f"  Future positions will be relative to this point.")
-
-    # Save
-    os.makedirs(os.path.dirname(SURFACE_CALIB_FILE), exist_ok=True)
-    with open(SURFACE_CALIB_FILE, "w") as f:
-        json.dump({"origin": pos.tolist()}, f, indent=2)
-    print(f"{C.GREEN}[calib]{C.RESET} Saved to {SURFACE_CALIB_FILE}")
-    return pos
-
-
-def to_surface_coords(pos):
-    """Convert absolute arm-frame position to surface-relative coordinates.
-    Returns (relative_pos, has_origin) tuple."""
-    origin = get_surface_origin()
-    if origin is not None:
-        return pos - origin, True
-    return pos, False
 
 def format_position(pos):
-    """Format a position for display, using surface coords if calibrated."""
-    rel, has_origin = to_surface_coords(pos)
-    prefix = "(surface) " if has_origin else ""
-    return f"{prefix}right={rel[0]*100:.1f}cm fwd={rel[1]*100:.1f}cm up={rel[2]*100:.1f}cm"
+    """Format a position for display (board coordinates)."""
+    board = pos.copy()
+    board[0] += _arm_offset[0]
+    board[1] += _arm_offset[1]
+    board[2] += _arm_offset[2]
+    return f"right={board[0]*100:.1f}cm fwd={board[1]*100:.1f}cm up={board[2]*100:.1f}cm"
 
 
 def detect_and_locate(target_label=None, use_triangulation=False):
@@ -359,10 +297,10 @@ def detect_and_locate(target_label=None, use_triangulation=False):
     Returns: (x, y, z) in meters, or None.
     """
     # Load top camera calibration
-    top_matrix, top_dist, calib_res = load_calibration(TOP_CALIB_FILE)
-    if top_matrix is None:
-        print(f"{C.RED}[detect]{C.RESET} Top camera not calibrated! Run:")
-        print(f"  python camera_calibration.py --camera top --index <N>")
+    try:
+        top_matrix_raw, top_dist, _ = get_intrinsics("top")
+    except Exception:
+        print(f"{C.RED}[detect]{C.RESET} Top camera not calibrated! Check cameras.json")
         return None
 
     # Move to observe first for stereo — clears the arm from blocking the top camera
@@ -377,19 +315,9 @@ def detect_and_locate(target_label=None, use_triangulation=False):
         print(f"{C.RED}[detect]{C.RESET} Cannot get top camera frame")
         return None
 
-    # Scale calibration matrix if frame resolution differs from calibration resolution
-    if calib_res is not None:
-        frame_h, frame_w = frame_top.shape[:2]
-        calib_w, calib_h = calib_res
-        if frame_w != calib_w or frame_h != calib_h:
-            sx = frame_w / calib_w
-            sy = frame_h / calib_h
-            top_matrix = top_matrix.copy()
-            top_matrix[0, 0] *= sx  # fx
-            top_matrix[0, 2] *= sx  # cx
-            top_matrix[1, 1] *= sy  # fy
-            top_matrix[1, 2] *= sy  # cy
-            print(f"{C.DIM}[detect] Scaled calibration {calib_w}x{calib_h} → {frame_w}x{frame_h}{C.RESET}")
+    # Scale intrinsics to match frame resolution
+    frame_h, frame_w = frame_top.shape[:2]
+    top_matrix = get_scaled_intrinsics("top", frame_w, frame_h)[0]
 
     # Detect with GroundingDINO + Gemini verification
     print(f"{C.BLUE}[detect]{C.RESET} Running detection on top camera...")
@@ -407,14 +335,31 @@ def detect_and_locate(target_label=None, use_triangulation=False):
     pixel_top = best["center"]
     print(f"{C.GREEN}[detect]{C.RESET} Found: {best['label']} ({best['confidence']:.0%}) at pixel ({pixel_top[0]:.0f}, {pixel_top[1]:.0f})")
 
-    # Push annotated detection to stream overlay
+    # Push annotated detection to stream overlay (top + side)
+    overlay_payload = {}
     try:
         annotated_top = annotate_frame(frame_top, detections, target_idx=verified_idx)
         _, buf = cv2.imencode(".jpg", annotated_top, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        top_b64 = base64.b64encode(buf.tobytes()).decode()
-        requests.post(f"{ROBOT_SERVER}/detection_overlay", json={"top": top_b64}, timeout=3)
+        overlay_payload["top"] = base64.b64encode(buf.tobytes()).decode()
     except Exception:
         pass
+    # Side camera detection overlay
+    try:
+        frame_side = get_snapshot("side")
+        if frame_side is not None:
+            side_dets = detect_objects(frame_side, target_label)
+            annotated_side = annotate_frame(frame_side, side_dets, target_idx=0 if side_dets else None)
+            _, sbuf = cv2.imencode(".jpg", annotated_side, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            overlay_payload["side"] = base64.b64encode(sbuf.tobytes()).decode()
+            if side_dets:
+                print(f"{C.GREEN}[detect]{C.RESET} Side camera: {side_dets[0]['label']} ({side_dets[0]['confidence']:.0%}) + {len(side_dets)-1} more")
+    except Exception:
+        pass
+    if overlay_payload:
+        try:
+            requests.post(f"{ROBOT_SERVER}/detection_overlay", json=overlay_payload, timeout=3)
+        except Exception:
+            pass
 
     if not use_triangulation:
         # Phase 1: Table-plane intersection
@@ -425,13 +370,15 @@ def detect_and_locate(target_label=None, use_triangulation=False):
             return None
         # Set Z to calibrated surface or gripper clearance
         point[2] = get_surface_z()  # surface level
+        point = board_to_arm(point)
         print(f"{C.GREEN}[detect]{C.RESET} 3D position (table-plane): x={point[0]*100:.1f}cm y={point[1]*100:.1f}cm z={point[2]*100:.1f}cm")
         return point
     else:
-        # Phase 2: Full triangulation with both cameras
-        wrist_matrix, wrist_dist, wrist_calib_res = load_calibration(WRIST_CALIB_FILE)
-        if wrist_matrix is None:
-            print(f"{C.YELLOW}[detect]{C.RESET} Wrist camera not calibrated, falling back to table-plane")
+        # Phase 2: Full triangulation with top + side cameras
+        try:
+            side_matrix_raw, side_dist, _ = get_intrinsics("side")
+        except Exception:
+            print(f"{C.YELLOW}[detect]{C.RESET} Side camera not calibrated, falling back to table-plane")
             return detect_and_locate(target_label, use_triangulation=False)
 
         # Step 1: Get X/Y from top camera (already done above)
@@ -451,70 +398,57 @@ def detect_and_locate(target_label=None, use_triangulation=False):
         ray_world_t = cam_rot_top @ np.array([(ut - cx_t) / fx_t, (vt - cy_t) / fy_t, 1.0])
         ray_world_t = ray_world_t / np.linalg.norm(ray_world_t)
 
-        # Step 2: Move to side_view for Z estimation (horizontal view)
-        print(f"{C.BLUE}[detect]{C.RESET} Moving to side view for Z estimation...")
-        move_preset("side_view")
-        time.sleep(1)
-
-        frame_side = get_snapshot("wrist")
+        # Step 2: Get side camera frame (fixed camera, no arm movement needed)
+        frame_side = get_snapshot("side")
         if frame_side is None:
-            print(f"{C.YELLOW}[detect]{C.RESET} Cannot get side view frame, using surface Z")
+            print(f"{C.YELLOW}[detect]{C.RESET} Cannot get side camera frame, using surface Z")
             point = point_top.copy()
             point[2] = get_surface_z()
-            return point
+            return board_to_arm(point)
 
-        # Scale wrist calibration if needed
-        if wrist_calib_res is not None:
-            wh, ww = frame_side.shape[:2]
-            cw, ch = wrist_calib_res
-            if ww != cw or wh != ch:
-                sx, sy = ww / cw, wh / ch
-                wrist_matrix = wrist_matrix.copy()
-                wrist_matrix[0, 0] *= sx
-                wrist_matrix[0, 2] *= sx
-                wrist_matrix[1, 1] *= sy
-                wrist_matrix[1, 2] *= sy
+        # Scale side intrinsics to match frame
+        sh, sw = frame_side.shape[:2]
+        side_matrix = get_scaled_intrinsics("side", sw, sh)[0]
 
-        print(f"{C.BLUE}[detect]{C.RESET} Running detection on side-view wrist camera...")
+        print(f"{C.BLUE}[detect]{C.RESET} Running detection on side camera...")
         detections_side = detect_objects(frame_side, target_label)
         if not detections_side:
             print(f"{C.YELLOW}[detect]{C.RESET} No objects in side view, using surface Z")
             point = point_top.copy()
             point[2] = get_surface_z()
-            return point
+            return board_to_arm(point)
 
         pixel_side = detections_side[0]["center"]
         print(f"{C.GREEN}[detect]{C.RESET} Side detection: {detections_side[0]['label']} ({detections_side[0]['confidence']:.0%}) at pixel ({pixel_side[0]:.0f}, {pixel_side[1]:.0f})")
 
-        # Wrist camera extrinsics at side_view position (from FK)
-        side_angles = [-5.5, 24.1, 65.6, -71.6, -86.3]
-        wrist_pos, wrist_rot = get_wrist_extrinsics_at(side_angles)
-        print(f"{C.DIM}[detect] Side cam: right={wrist_pos[0]*100:.1f}cm fwd={wrist_pos[1]*100:.1f}cm up={wrist_pos[2]*100:.1f}cm (pitch={np.degrees(np.arcsin((wrist_rot @ np.array([0,0,1]))[2])):.0f}°){C.RESET}")
+        # Side camera extrinsics from cameras.json
+        side_pos, side_rot = get_extrinsics("side")
+        print(f"{C.DIM}[detect] Side cam: right={side_pos[0]*100:.1f}cm fwd={side_pos[1]*100:.1f}cm up={side_pos[2]*100:.1f}cm{C.RESET}")
 
-        # Side-view wrist camera ray
-        pts_w = np.array([[[pixel_side[0], pixel_side[1]]]], dtype=np.float64)
-        undist_w = cv2.undistortPoints(pts_w, wrist_matrix, wrist_dist, P=wrist_matrix)
-        uw, vw = undist_w[0, 0]
-        fx_w, fy_w = wrist_matrix[0, 0], wrist_matrix[1, 1]
-        cx_w, cy_w = wrist_matrix[0, 2], wrist_matrix[1, 2]
-        ray_world_w = wrist_rot @ np.array([(uw - cx_w) / fx_w, (vw - cy_w) / fy_w, 1.0])
-        ray_world_w = ray_world_w / np.linalg.norm(ray_world_w)
+        # Side camera ray
+        pts_s = np.array([[[pixel_side[0], pixel_side[1]]]], dtype=np.float64)
+        undist_s = cv2.undistortPoints(pts_s, side_matrix, side_dist, P=side_matrix)
+        us, vs = undist_s[0, 0]
+        fx_s, fy_s = side_matrix[0, 0], side_matrix[1, 1]
+        cx_s, cy_s = side_matrix[0, 2], side_matrix[1, 2]
+        ray_world_s = side_rot @ np.array([(us - cx_s) / fx_s, (vs - cy_s) / fy_s, 1.0])
+        ray_world_s = ray_world_s / np.linalg.norm(ray_world_s)
 
         # Closest point between top ray (downward) and side ray (horizontal) for Z
-        w0 = cam_pos_top - wrist_pos
-        b = np.dot(ray_world_t, ray_world_w)
+        w0 = cam_pos_top - side_pos
+        b = np.dot(ray_world_t, ray_world_s)
         d = np.dot(ray_world_t, w0)
-        e = np.dot(ray_world_w, w0)
+        e = np.dot(ray_world_s, w0)
         denom = 1.0 - b * b
         if abs(denom) > 1e-6:
             s = (b * e - d) / denom
             t = (e - b * d) / denom
             pt_top_ray = cam_pos_top + s * ray_world_t
-            pt_side_ray = wrist_pos + t * ray_world_w
+            pt_side_ray = side_pos + t * ray_world_s
             midpoint = (pt_top_ray + pt_side_ray) / 2
             ray_dist = np.linalg.norm(pt_top_ray - pt_side_ray)
             z_stereo = midpoint[2]
-            print(f"{C.DIM}[detect] Stereo Z (side view): {z_stereo*100:.1f}cm (ray distance={ray_dist*100:.1f}cm){C.RESET}")
+            print(f"{C.DIM}[detect] Stereo Z (side cam): {z_stereo*100:.1f}cm (ray distance={ray_dist*100:.1f}cm){C.RESET}")
             if ray_dist > 0.10:
                 print(f"{C.YELLOW}[detect]{C.RESET} Warning: rays are {ray_dist*100:.1f}cm apart")
         else:
@@ -535,6 +469,7 @@ def detect_and_locate(target_label=None, use_triangulation=False):
             if z_stereo is not None:
                 print(f"{C.YELLOW}[detect]{C.RESET} Stereo Z={z_stereo*100:.1f}cm out of range, using surface level")
             print(f"{C.GREEN}[detect]{C.RESET} 3D position (top X/Y, surface Z): right={point[0]*100:.1f}cm fwd={point[1]*100:.1f}cm up={point[2]*100:.1f}cm")
+        point = board_to_arm(point)
         return point
 
 
@@ -596,12 +531,15 @@ def pickup_sequence(target_label, use_stereo=False):
     _send_joints({"gripper": 0})
     time.sleep(1)
 
-    # Step 7: Lift
+    # Step 7: Lift — just raise shoulder 15 degrees
     print(f"{C.BLUE}[7/7]{C.RESET} Lifting...")
-    lift_pos = target_pos.copy()
-    lift_pos[2] = GRIPPER_APPROACH_HEIGHT
-    move_to_xyz(lift_pos)
-    time.sleep(0.5)
+    current = _get_current_joints_dict()
+    if current:
+        cur_lift = current.get("shoulder_lift", 0)
+        lift_val = cur_lift - 15
+        print(f"{C.DIM}[lift] shoulder_lift: {cur_lift:.1f} → {lift_val:.1f}{C.RESET}")
+        _interpolate_move({"shoulder_lift": lift_val}, steps=10, delay=0.05)
+    time.sleep(0.3)
 
     # Move to drop
     print(f"{C.BLUE}[drop]{C.RESET} Moving to drop position...")
@@ -642,7 +580,7 @@ def startup_check():
         return False
 
     # Cameras
-    for cam in ["top", "wrist"]:
+    for cam in ["top", "side"]:
         frame = get_snapshot(cam)
         if frame is not None:
             print(f"  {C.GREEN}OK{C.RESET}  {cam} camera ({frame.shape[1]}x{frame.shape[0]})")
@@ -651,17 +589,17 @@ def startup_check():
             all_ok = False
 
     # Calibration
-    top_m, _, _ = load_calibration(TOP_CALIB_FILE)
-    if top_m is not None:
+    try:
+        top_m, _, _ = get_intrinsics("top")
         print(f"  {C.GREEN}OK{C.RESET}  Top camera calibrated")
-    else:
-        print(f"  {C.YELLOW}--{C.RESET}  Top camera NOT calibrated (run camera_calibration.py)")
+    except Exception:
+        print(f"  {C.YELLOW}--{C.RESET}  Top camera NOT calibrated (check cameras.json)")
 
-    wrist_m, _, _ = load_calibration(WRIST_CALIB_FILE)
-    if wrist_m is not None:
-        print(f"  {C.GREEN}OK{C.RESET}  Wrist camera calibrated")
-    else:
-        print(f"  {C.DIM}--{C.RESET}  Wrist camera not calibrated (optional, for triangulation)")
+    try:
+        side_m, _, _ = get_intrinsics("side")
+        print(f"  {C.GREEN}OK{C.RESET}  Side camera calibrated")
+    except Exception:
+        print(f"  {C.DIM}--{C.RESET}  Side camera not calibrated (optional, for triangulation)")
 
     # YOLO
     try:
@@ -846,10 +784,6 @@ def run_agent():
                     else:
                         print(f"{C.RED}[pos]{C.RESET} Object not found")
 
-            elif cmd == "/calibrate_surface":
-                label = " ".join(parts[1:]) if len(parts) > 1 else None
-                calibrate_surface(label)
-
             elif cmd in ("/info", "/status"):
                 status = get_status()
                 if status:
@@ -857,8 +791,11 @@ def run_agent():
                     print(f"  Arm: {C.GREEN if status.get('robot_connected') else C.RED}{'connected' if status.get('robot_connected') else 'disconnected'}{C.RESET}")
                     cams = status.get("cameras", [])
                     print(f"  Cameras: {', '.join(cams) if cams else 'none'}")
-                    top_m, _, _ = load_calibration(TOP_CALIB_FILE)
-                    print(f"  Top calibrated: {C.GREEN}yes{C.RESET}" if top_m is not None else f"  Top calibrated: {C.RED}no{C.RESET}")
+                    try:
+                        get_intrinsics("top")
+                        print(f"  Top calibrated: {C.GREEN}yes{C.RESET}")
+                    except Exception:
+                        print(f"  Top calibrated: {C.RED}no{C.RESET}")
                     print()
 
             else:

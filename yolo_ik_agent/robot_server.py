@@ -991,7 +991,37 @@ def _run_command_thread(command):
             args_str = command.split(None, 1)[1].strip() if " " in command else ""
             args_lower = args_str.lower()
 
-            if args_lower == "clear":
+            if args_lower.startswith("arm"):
+                arm_parts = args_str.split()
+                if len(arm_parts) == 3:
+                    try:
+                        arm_r = float(arm_parts[1]) / 100.0
+                        arm_f = float(arm_parts[2]) / 100.0
+                        # Save to cameras.json
+                        cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
+                        with open(cam_json_path, "r") as f:
+                            cam_data = json.load(f)
+                        cam_data["arm_offset"] = [arm_r, arm_f]
+                        with open(cam_json_path, "w") as f:
+                            json.dump(cam_data, f, indent=2)
+                            f.write("\n")
+                        log(f"[cmd] Arm offset set: right={arm_r*100:.1f}cm fwd={arm_f*100:.1f}cm")
+                        log(f"[cmd] Detection results will be converted: arm_pos = board_pos - ({arm_r*100:.1f}, {arm_f*100:.1f})")
+                        log(f"[cmd] Restart server for this to take effect")
+                    except ValueError:
+                        log("[cmd] Usage: /calib_ex arm <right_cm> <fwd_cm>")
+                else:
+                    # Show current offset
+                    cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
+                    try:
+                        with open(cam_json_path) as f:
+                            cam_data = json.load(f)
+                        offset = cam_data.get("arm_offset", [0, 0])
+                        log(f"[cmd] Current arm offset: right={offset[0]*100:.1f}cm fwd={offset[1]*100:.1f}cm")
+                    except Exception:
+                        log("[cmd] No arm offset configured")
+                    log("[cmd] Usage: /calib_ex arm <right_cm> <fwd_cm>")
+            elif args_lower == "clear":
                 _calib_ex_samples.clear()
                 _save_calib_ex_samples()
                 log("[cmd] Cleared all extrinsic calibration samples")
@@ -1177,15 +1207,6 @@ def _run_command_thread(command):
                 log("[cmd]   /calib_ex solve   — compute extrinsics from samples")
                 log("[cmd]   /calib_ex clear   — reset all samples")
                 log("[cmd]   /calib_ex status  — show collected samples")
-        elif lower.startswith("/calibrate_surface"):
-            from yolo_ik_agent import calibrate_surface
-            label = command.split(None, 1)[1] if " " in command else None
-            log(f"[cmd] Calibrating surface height{(' with ' + label) if label else ''}...")
-            result = calibrate_surface(label)
-            if result is not None:
-                log(f"[cmd] Origin set: right={result[0]*100:.1f}cm fwd={result[1]*100:.1f}cm up={result[2]*100:.1f}cm")
-            else:
-                log("[cmd] Calibration failed")
         else:
             log(f"[cmd] Unknown command: {command}")
 

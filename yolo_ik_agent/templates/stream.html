@@ -186,9 +186,8 @@ var cmdCommands=[
   {cmd:'/gripper open',desc:'Open gripper'},
   {cmd:'/gripper close',desc:'Close gripper'},
   {cmd:'/pos ',desc:'Move gripper to object without picking up (e.g. /pos red block)'},
-  {cmd:'/calibrate_surface ',desc:'Calibrate surface height (e.g. /calibrate_surface red block)'},
   {cmd:'/autofocus',desc:'Auto-focus all cameras and save focus values'},
-  {cmd:'/calib_ex ',desc:'Extrinsic calibration — /calib_ex <right_cm> <fwd_cm> | solve | clear | status'},
+  {cmd:'/calib_ex ',desc:'Extrinsic calibration — /calib_ex <right_cm> <fwd_cm> | solve | clear | status | arm'},
 ];
 var cmdSelIdx=-1;
 function cmdAutocomplete(){
@@ -228,6 +227,7 @@ function toggleHelp(){
   h.innerHTML='<h3 style="color:#0ff;margin-bottom:10px">Commands</h3>'+
     '<table style="width:100%;border-collapse:collapse">'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">pick up &lt;object&gt;</td><td style="color:#888;padding:4px">Pick up an object using top camera</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/pick &lt;object&gt;</td><td style="color:#888;padding:4px">Pick up shorthand (same as pick up)</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/pick3d &lt;object&gt;</td><td style="color:#888;padding:4px">Pick up using stereo 3D (both cameras)</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/locate &lt;object&gt;</td><td style="color:#888;padding:4px">Detect + show 3D position (table-plane)</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/locate3d &lt;object&gt;</td><td style="color:#888;padding:4px">Detect + show 3D position (stereo)</td></tr>'+
@@ -240,9 +240,10 @@ function toggleHelp(){
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/drop</td><td style="color:#888;padding:4px">Move to drop position</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/gripper open</td><td style="color:#888;padding:4px">Open the gripper</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/gripper close</td><td style="color:#888;padding:4px">Close the gripper</td></tr>'+
-    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calibrate_surface</td><td style="color:#888;padding:4px">Calibrate table/surface height using stereo</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/t on / /t off</td><td style="color:#888;padding:4px">Toggle motor torque on/off</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/pos &lt;object&gt;</td><td style="color:#888;padding:4px">Move gripper to object position (no grip)</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/autofocus</td><td style="color:#888;padding:4px">Auto-focus all cameras and save values</td></tr>'+
-    '<tr><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calib_ex &lt;r&gt; &lt;f&gt;</td><td style="color:#888;padding:4px">Extrinsic calibration (solve | clear | status)</td></tr>'+
+    '<tr><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calib_ex &lt;r&gt; &lt;f&gt;</td><td style="color:#888;padding:4px">Extrinsic calibration (solve | clear | status | arm)</td></tr>'+
     '</table>'+
     '<h3 style="color:#0ff;margin:12px 0 8px">Examples (click to fill)</h3>'+
     '<div style="color:#ff0;cursor:pointer;padding:2px 0" onclick="fillCmd(this)">pick up red block</div>'+
