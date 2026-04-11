@@ -68,11 +68,17 @@ def get_surface_z():
     return TABLE_Z
 
 def board_to_arm(pos):
-    """Convert board-frame position to arm-frame by subtracting arm offset X,Y."""
+    """Convert board-frame position to arm-frame by subtracting arm offset X,Y.
+    Z is NOT transformed — callers set Z separately (e.g. get_surface_z() or stereo Z)."""
     result = pos.copy()
     result[0] -= _arm_offset[0]
     result[1] -= _arm_offset[1]
     return result
+
+
+def board_to_arm_full(pos):
+    """Convert board-frame position to arm-frame, including Z."""
+    return pos - _arm_offset
 
 # ---- Coordinate transforms ----
 # Physical world: +X = right, +Y = forward, +Z = up (relative to arm base on table)
@@ -456,7 +462,8 @@ def detect_and_locate(target_label=None, use_triangulation=False):
             print(f"{C.DIM}[detect] Rays are parallel{C.RESET}")
 
         # Use stereo Z if reasonable, re-cast top ray at that Z for correct X/Y
-        z_reasonable = z_stereo is not None and (TABLE_Z - 0.05) <= z_stereo <= 0.20
+        surface_z = get_surface_z()
+        z_reasonable = z_stereo is not None and (surface_z - 0.05) <= z_stereo <= 0.20
         if z_reasonable:
             point = pixel_to_table_ray(pixel_top, top_matrix, top_dist, cam_pos_top, cam_rot_top, table_z=z_stereo)
             if point is None:
@@ -489,6 +496,8 @@ def pickup_sequence(target_label, use_stereo=False):
     # Step 2: Detect and locate
     print(f"{C.BLUE}[2/8]{C.RESET} Detecting {target_label}...")
     target_pos = detect_and_locate(target_label, use_triangulation=use_stereo)
+    if target_pos is not None:
+        print(f"{C.GREEN}[pickup]{C.RESET} Target coordinates: x={target_pos[0]*100:.1f}cm y={target_pos[1]*100:.1f}cm z={target_pos[2]*100:.1f}cm")
     if target_pos is None:
         print(f"{C.RED}[pickup]{C.RESET} Cannot locate target — aborting")
         try:
@@ -558,7 +567,7 @@ def pickup_sequence(target_label, use_stereo=False):
         pass
 
     print(f"\n{C.GREEN}{C.BOLD}Pickup complete!{C.RESET}\n")
-    return True
+    return target_pos
 
 
 def startup_check():
@@ -713,11 +722,14 @@ def run_agent():
 
             elif cmd == "/ik":
                 if len(parts) != 4:
-                    print(f"  Usage: /ik <right_cm> <fwd_cm> <up_cm>")
+                    print(f"  Usage: /ik <right_cm> <fwd_cm> <up_cm>  (board coordinates)")
                 else:
                     try:
-                        x, y, z = float(parts[1])/100, float(parts[2])/100, float(parts[3])/100
-                        move_to_xyz([x, y, z])
+                        board_pos = np.array([float(parts[1])/100, float(parts[2])/100, float(parts[3])/100])
+                        arm_pos = board_to_arm_full(board_pos)
+                        print(f"  Board: right={board_pos[0]*100:.1f}cm fwd={board_pos[1]*100:.1f}cm up={board_pos[2]*100:.1f}cm")
+                        print(f"  Arm:   right={arm_pos[0]*100:.1f}cm fwd={arm_pos[1]*100:.1f}cm up={arm_pos[2]*100:.1f}cm")
+                        move_to_xyz(arm_pos)
                     except ValueError:
                         print(f"  {C.RED}Invalid coordinates{C.RESET}")
 

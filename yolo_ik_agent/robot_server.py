@@ -756,7 +756,7 @@ def _run_command_thread(command):
         from yolo_ik_agent import (
             pickup_sequence, detect_and_locate, move_to_xyz,
             move_preset, get_joint_angles, forward_kinematics,
-            urdf_to_physical, get_status, _send_joints
+            urdf_to_physical, get_status, _send_joints, format_position
         )
         with _cmd_lock:
             _cmd_state["running"] = True
@@ -785,7 +785,11 @@ def _run_command_thread(command):
             if label:
                 log(f"[cmd] Running pickup: {label}")
                 result = pickup_sequence(label)
-                log(f"[cmd] Result: {'success' if result else 'failed'}")
+                if result is not None:
+                    log(f"[cmd] Coordinates: {format_position(result)}")
+                    log(f"[cmd] Result: success")
+                else:
+                    log(f"[cmd] Result: failed")
             else:
                 log("[cmd] Usage: /pick <object>")
         elif is_pick3d:
@@ -793,7 +797,11 @@ def _run_command_thread(command):
             if label:
                 log(f"[cmd] Running 3D pickup: {label}")
                 result = pickup_sequence(label, use_stereo=True)
-                log(f"[cmd] Result: {'success' if result else 'failed'}")
+                if result is not None:
+                    log(f"[cmd] Coordinates: {format_position(result)}")
+                    log(f"[cmd] Result: success")
+                else:
+                    log(f"[cmd] Result: failed")
             else:
                 log("[cmd] Usage: /pick3d <object>")
         elif is_pickup:
@@ -862,17 +870,21 @@ def _run_command_thread(command):
                 log(f"[cmd] Gripper at: right={phys[0]*100:.1f}cm fwd={phys[1]*100:.1f}cm up={phys[2]*100:.1f}cm")
                 log(f"[cmd] Joints: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}")
         elif lower.startswith("/ik "):
+            import numpy as _np
+            from yolo_ik_agent import board_to_arm_full
             parts = command.split()
             if len(parts) == 4:
                 try:
-                    x, y, z = float(parts[1])/100, float(parts[2])/100, float(parts[3])/100
-                    log(f"[cmd] Moving to ({parts[1]}, {parts[2]}, {parts[3]}) cm...")
-                    move_to_xyz([x, y, z])
+                    board_pos = _np.array([float(parts[1])/100, float(parts[2])/100, float(parts[3])/100])
+                    arm_pos = board_to_arm_full(board_pos)
+                    log(f"[cmd] Board: right={board_pos[0]*100:.1f}cm fwd={board_pos[1]*100:.1f}cm up={board_pos[2]*100:.1f}cm")
+                    log(f"[cmd] Arm:   right={arm_pos[0]*100:.1f}cm fwd={arm_pos[1]*100:.1f}cm up={arm_pos[2]*100:.1f}cm")
+                    move_to_xyz(arm_pos)
                     log("[cmd] Done")
                 except ValueError:
                     log("[cmd] Invalid coordinates")
             else:
-                log("[cmd] Usage: /ik <right_cm> <fwd_cm> <up_cm>")
+                log("[cmd] Usage: /ik <right_cm> <fwd_cm> <up_cm>  (board coordinates)")
         elif lower.startswith("/gripper"):
             parts = command.split()
             if len(parts) > 1 and parts[1].lower() in ("open", "100"):
@@ -986,7 +998,7 @@ def _run_command_thread(command):
             import cv2, numpy as np, json, os
             from detect import detect_objects
             from cameras import get_intrinsics, get_scaled_intrinsics, update_camera, reload as reload_cameras
-            from config import TABLE_Z
+            from yolo_ik_agent import get_surface_z
 
             args_str = command.split(None, 1)[1].strip() if " " in command else ""
             args_lower = args_str.lower()
@@ -1157,7 +1169,7 @@ def _run_command_thread(command):
                         right_m = None
 
                     if right_m is not None:
-                        world_pt = [right_m, fwd_m, TABLE_Z]
+                        world_pt = [right_m, fwd_m, get_surface_z()]
                         log(f"[cmd] Detecting red block at right={right_m*100:.1f}cm fwd={fwd_m*100:.1f}cm...")
                         sample = {"world": world_pt, "pixels": {}}
 

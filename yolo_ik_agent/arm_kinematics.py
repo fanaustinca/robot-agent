@@ -120,12 +120,17 @@ def inverse_kinematics(target_xyz, current_angles_deg=None, wrist_roll_deg=-90.0
     chain = get_chain()
     target = np.array(target_xyz)
 
-    # Initial guess: current angles with wrist roll fixed
+    # Initial guess: current angles with wrist roll fixed, clamped to URDF bounds
     initial = None
     if current_angles_deg is not None:
         angles = list(current_angles_deg)
         angles[4] = wrist_roll_deg  # fix roll in initial guess
         initial = [0] + [np.radians(a) for a in angles] + [0]
+        # Clamp to joint bounds so IKPy doesn't reject the initial guess
+        for i, link in enumerate(chain.links):
+            if link.bounds is not None:
+                lo, hi = link.bounds
+                initial[i] = np.clip(initial[i], lo, hi)
 
     angles_rad = chain.inverse_kinematics(target_position=target, initial_position=initial)
 
