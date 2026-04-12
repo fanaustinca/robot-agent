@@ -19,10 +19,17 @@ import json
 import os
 import threading
 import time
-from io import BytesIO
-from flask import Flask, jsonify, request, Response, stream_with_context, render_template
 
 import cameras as cameras_config
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    render_template,
+    request,
+    stream_with_context,
+)
+
 
 # ---- Terminal Colors ----
 class C:
@@ -35,11 +42,14 @@ class C:
     BOLD = "\033[1m"
     RESET = "\033[0m"
 
+
 # ---- Config ----
 PORT = 7878
 JPEG_QUALITY = 90
-CROSSHAIR_OFFSET_Y = 53  # pixels down from center (tune until dot matches gripper close point)
-CROSSHAIR_OFFSET_X = 30   # pixels right from center
+CROSSHAIR_OFFSET_Y = (
+    53  # pixels down from center (tune until dot matches gripper close point)
+)
+CROSSHAIR_OFFSET_X = 30  # pixels right from center
 
 # Cameras resolved by device name — override with CAM_TOP_NAME / CAM_SIDE_NAME
 CAMERA_TOP_NAME = os.environ.get("CAM_TOP_NAME", "HD Pro Webcam C920")
@@ -47,8 +57,10 @@ CAMERA_SIDE_NAME = os.environ.get("CAM_SIDE_NAME", "Logitech Webcam C930e")
 
 
 import sys as _sys
+
 _sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import arms as arms_config
+
 ROBOT_SERIAL = arms_config.follower_serial()
 LEADER_SERIAL = arms_config.leader_serial()
 TELEOP_FPS = arms_config.teleop_fps()
@@ -64,12 +76,13 @@ robot_lock = threading.Lock()
 torque_enabled = False
 
 # ---- Joint Position History (rolling 10 min buffer) ----
-HISTORY_INTERVAL = 0.1   # seconds between samples (10hz)
-HISTORY_MAX_SECS = 600   # 10 minutes
+HISTORY_INTERVAL = 0.1  # seconds between samples (10hz)
+HISTORY_MAX_SECS = 600  # 10 minutes
 HISTORY_MAX_SAMPLES = int(HISTORY_MAX_SECS / HISTORY_INTERVAL)
-joint_history = []       # [{t: float, joints: {k: v, ...}}, ...]
+joint_history = []  # [{t: float, joints: {k: v, ...}}, ...]
 history_lock = threading.Lock()
-history_enabled = True    # can be toggled via /timeline endpoint or agent command
+history_enabled = True  # can be toggled via /timeline endpoint or agent command
+
 
 def history_recorder():
     """Background thread: sample joint positions into rolling buffer."""
@@ -82,7 +95,11 @@ def history_recorder():
             try:
                 if robot is not None:
                     obs = robot.get_observation()
-                    joints = {k: float(v) for k, v in obs.items() if "pos" in k or "joint" in k}
+                    joints = {
+                        k: float(v)
+                        for k, v in obs.items()
+                        if "pos" in k or "joint" in k
+                    }
                     if joints:
                         with history_lock:
                             joint_history.append({"t": time.time(), "joints": joints})
@@ -94,14 +111,15 @@ def history_recorder():
                 robot_lock.release()
         time.sleep(HISTORY_INTERVAL)
 
+
 # ---- Agent Activity State (set by agent, read by dashboard) ----
 agent_state = {
-    "phase": "idle",         # idle, calibrating, homing, aligning, waiting_confirm, lowering, gripping, lifting, dropping, done
-    "detail": "",            # human-readable detail text
-    "align_iteration": 0,   # current alignment iteration
-    "align_max": 0,          # max alignment iterations
-    "confirm_pending": False, # True when waiting for grip confirm
-    "confirm_result": None,   # "y" or "n" — set by dashboard, read by agent
+    "phase": "idle",  # idle, calibrating, homing, aligning, waiting_confirm, lowering, gripping, lifting, dropping, done
+    "detail": "",  # human-readable detail text
+    "align_iteration": 0,  # current alignment iteration
+    "align_max": 0,  # max alignment iterations
+    "confirm_pending": False,  # True when waiting for grip confirm
+    "confirm_result": None,  # "y" or "n" — set by dashboard, read by agent
 }
 
 # ---- Detection Overlay (agent pushes annotated frames to show on stream) ----
@@ -116,11 +134,13 @@ chat_lock = threading.Lock()
 # Messages submitted from dashboard, waiting for agent to pick up
 chat_pending = []
 
+
 def init_robot():
     global robot
     robot = arms_config.connect_follower()
     if robot is None:
         print(f"{C.YELLOW}[robot]{C.RESET} Running in camera-only mode")
+
 
 def init_cameras():
     for name, device_name in [("top", CAMERA_TOP_NAME), ("side", CAMERA_SIDE_NAME)]:
@@ -128,6 +148,7 @@ def init_cameras():
         if cap is not None:
             cameras[name] = cap
             camera_info[name] = {"name": device_name, "index": idx}
+
 
 def reopen_camera(name):
     """Try to reopen a camera by name. Returns True on success."""
@@ -154,9 +175,11 @@ def reopen_camera(name):
     cameras.pop(name, None)
     return False
 
+
 def capture_snapshot(name):
     """Capture a frame, resize, return base64 JPEG string."""
     import cv2
+
     lock = camera_locks.get(name)
     if lock is None:
         return None, f"Unknown camera '{name}'"
@@ -180,6 +203,7 @@ def capture_snapshot(name):
     b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
     return b64, None
 
+
 def get_joint_positions():
     if robot is None:
         return None
@@ -192,9 +216,11 @@ def get_joint_positions():
     except Exception as e:
         return {"error": str(e)}
 
+
 PRESETS = arms_config.PRESETS
 
 # ---- Routes ----
+
 
 @app.route("/status")
 def status():
@@ -210,34 +236,38 @@ def status():
             leader_joints = {"error": "read failed"}
     # Robot port info
     robot_port_info = None
-    if robot is not None and hasattr(robot, 'bus') and hasattr(robot.bus, 'port'):
+    if robot is not None and hasattr(robot, "bus") and hasattr(robot.bus, "port"):
         robot_port_info = robot.bus.port
     leader_port_info = None
-    if leader is not None and hasattr(leader, 'bus') and hasattr(leader.bus, 'port'):
+    if leader is not None and hasattr(leader, "bus") and hasattr(leader.bus, "port"):
         leader_port_info = leader.bus.port
-    elif leader is not None and hasattr(leader, 'port'):
+    elif leader is not None and hasattr(leader, "port"):
         leader_port_info = leader.port
-    return jsonify({
-        "ok": True,
-        "robot_connected": robot is not None,
-        "leader_connected": leader is not None,
-        "robot_port": robot_port_info,
-        "leader_port": leader_port_info,
-        "cameras": list(cameras.keys()),
-        "camera_info": camera_info,
-        "joints": joints,
-        "leader_joints": leader_joints,
-        "torque_enabled": torque_enabled,
-        "teleop_active": arms_config.is_teleop_active(),
-        "teleop_fps": TELEOP_FPS,
-        "floor_drop": floor_drop,
-        "history_enabled": history_enabled,
-        "agent": agent_state,
-        "timestamp": time.time()
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "robot_connected": robot is not None,
+            "leader_connected": leader is not None,
+            "robot_port": robot_port_info,
+            "leader_port": leader_port_info,
+            "cameras": list(cameras.keys()),
+            "camera_info": camera_info,
+            "joints": joints,
+            "leader_joints": leader_joints,
+            "torque_enabled": torque_enabled,
+            "teleop_active": arms_config.is_teleop_active(),
+            "teleop_fps": TELEOP_FPS,
+            "floor_drop": floor_drop,
+            "history_enabled": history_enabled,
+            "agent": agent_state,
+            "timestamp": time.time(),
+        }
+    )
+
 
 def mjpeg_generator(name):
     import cv2
+
     fail_count = 0
     while True:
         lock = camera_locks.get(name)
@@ -251,7 +281,9 @@ def mjpeg_generator(name):
         if not ret:
             fail_count += 1
             if fail_count >= 5:
-                print(f"{C.YELLOW}[stream]{C.RESET} {name}: {fail_count} consecutive failures, reopening...")
+                print(
+                    f"{C.YELLOW}[stream]{C.RESET} {name}: {fail_count} consecutive failures, reopening..."
+                )
                 with lock:
                     reopen_camera(name)
                 fail_count = 0
@@ -262,21 +294,30 @@ def mjpeg_generator(name):
         overlay_b64 = detection_overlay.get(name)
         if overlay_b64 and (time.time() - detection_overlay.get("ts", 0)) < 10:
             overlay_bytes = base64.b64decode(overlay_b64)
-            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + overlay_bytes + b"\r\n")
+            yield (
+                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + overlay_bytes + b"\r\n"
+            )
         else:
             sw, sh = cameras_config.get_resolution(name)
             frame = cv2.resize(frame, (sw, sh))
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
+            _, buf = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+            )
+            yield (
+                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+            )
         time.sleep(0.05)  # ~20 fps target (cameras deliver ~12-15fps max)
+
 
 @app.route("/stream/<name>")
 def stream(name):
     if name not in ["top", "side"]:
         return jsonify({"error": "Unknown camera. Use 'top' or 'side'"}), 400
-    from flask import Response, stream_with_context
-    return Response(stream_with_context(mjpeg_generator(name)),
-                    mimetype="multipart/x-mixed-replace; boundary=frame")
+    return Response(
+        stream_with_context(mjpeg_generator(name)),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
 
 @app.route("/stream")
 def stream_index():
@@ -293,6 +334,7 @@ def yolo_detect():
     """Run YOLO detection on top camera, return annotated image + results."""
     import cv2
     import numpy as np
+
     label = request.args.get("label", "") or None
     roi_str = request.args.get("roi", "")
 
@@ -306,10 +348,10 @@ def yolo_detect():
     h, w = frame.shape[:2]
 
     # Lazy-load YOLO
-    from detect import detect_objects, annotate_frame
     from camera_calibration import pixel_to_table_ray
-    from cameras import get_scaled_intrinsics, get_extrinsics, get_intrinsics
+    from cameras import get_extrinsics, get_scaled_intrinsics
     from config import GRIPPER_CLEARANCE
+    from detect import annotate_frame, detect_objects
 
     # Parse ROI
     roi_px = None
@@ -329,8 +371,13 @@ def yolo_detect():
         crop = frame[y1:y2, x1:x2]
         dets = detect_objects(crop, label)
         for d in dets:
-            d["bbox"] = (d["bbox"][0]+x1, d["bbox"][1]+y1, d["bbox"][2]+x1, d["bbox"][3]+y1)
-            d["center"] = (d["center"][0]+x1, d["center"][1]+y1)
+            d["bbox"] = (
+                d["bbox"][0] + x1,
+                d["bbox"][1] + y1,
+                d["bbox"][2] + x1,
+                d["bbox"][3] + y1,
+            )
+            d["center"] = (d["center"][0] + x1, d["center"][1] + y1)
     else:
         dets = detect_objects(frame, label)
 
@@ -338,10 +385,18 @@ def yolo_detect():
     if roi_px:
         x1, y1, x2, y2 = roi_px
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 255), 2)
-        cv2.putText(annotated, "ROI", (x1+4, y1+16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+        cv2.putText(
+            annotated,
+            "ROI",
+            (x1 + 4, y1 + 16),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 0, 255),
+            1,
+        )
 
-    cv2.line(annotated, (w//2-20, h//2), (w//2+20, h//2), (255, 0, 255), 1)
-    cv2.line(annotated, (w//2, h//2-20), (w//2, h//2+20), (255, 0, 255), 1)
+    cv2.line(annotated, (w // 2 - 20, h // 2), (w // 2 + 20, h // 2), (255, 0, 255), 1)
+    cv2.line(annotated, (w // 2, h // 2 - 20), (w // 2, h // 2 + 20), (255, 0, 255), 1)
 
     # Compute 3D position
     position = None
@@ -349,12 +404,25 @@ def yolo_detect():
         try:
             top_matrix, top_dist = get_scaled_intrinsics("top", w, h)
             cam_pos, cam_rot = get_extrinsics("top")
-            point = pixel_to_table_ray(dets[0]["center"], top_matrix, top_dist, cam_pos, cam_rot)
+            point = pixel_to_table_ray(
+                dets[0]["center"], top_matrix, top_dist, cam_pos, cam_rot
+            )
             if point is not None:
                 point[2] = GRIPPER_CLEARANCE
-                position = [round(point[0]*100, 1), round(point[1]*100, 1), round(point[2]*100, 1)]
-                cv2.putText(annotated, f"right={position[0]}cm fwd={position[1]}cm up={position[2]}cm",
-                    (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+                position = [
+                    round(point[0] * 100, 1),
+                    round(point[1] * 100, 1),
+                    round(point[2] * 100, 1),
+                ]
+                cv2.putText(
+                    annotated,
+                    f"right={position[0]}cm fwd={position[1]}cm up={position[2]}cm",
+                    (10, h - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 165, 255),
+                    2,
+                )
         except Exception:
             pass
 
@@ -374,10 +442,15 @@ def yolo_detect():
         _, sbuf = cv2.imencode(".jpg", side_annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
         side_b64 = base64.b64encode(sbuf.tobytes()).decode()
 
-    return jsonify({
-        "detections": dets, "image": img_b64, "position": position,
-        "side_detections": side_dets, "side_image": side_b64,
-    })
+    return jsonify(
+        {
+            "detections": dets,
+            "image": img_b64,
+            "position": position,
+            "side_detections": side_dets,
+            "side_image": side_b64,
+        }
+    )
 
 
 @app.route("/snapshot/<name>")
@@ -387,14 +460,17 @@ def snapshot(name):
     b64, err = capture_snapshot(name)
     if err:
         return jsonify({"error": err}), 503
-    return jsonify({
-        "camera": name,
-        "format": "jpeg",
-        "width": cameras_config.get_resolution(name)[0],
-        "height": cameras_config.get_resolution(name)[1],
-        "data": b64,
-        "timestamp": time.time()
-    })
+    return jsonify(
+        {
+            "camera": name,
+            "format": "jpeg",
+            "width": cameras_config.get_resolution(name)[0],
+            "height": cameras_config.get_resolution(name)[1],
+            "data": b64,
+            "timestamp": time.time(),
+        }
+    )
+
 
 @app.route("/move", methods=["POST"])
 def move():
@@ -411,9 +487,11 @@ def move():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # ---- Forward/Backward Elbow Compensation (must match gemini_robot_agent.py) ----
-ELBOW_FORWARD_RATIO  = 2.0
+ELBOW_FORWARD_RATIO = 2.0
 ELBOW_BACKWARD_RATIO = 0.67
+
 
 @app.route("/move_direction", methods=["POST"])
 def move_direction():
@@ -425,16 +503,22 @@ def move_direction():
     direction = data.get("direction", "").lower()
     degrees = float(data.get("degrees", 5))
     if direction not in ("forward", "backward", "left", "right"):
-        return jsonify({"error": f"Unknown direction '{direction}'. Use forward/backward/left/right"}), 400
+        return jsonify(
+            {
+                "error": f"Unknown direction '{direction}'. Use forward/backward/left/right"
+            }
+        ), 400
     # Read current positions (hardware space)
     joints = get_joint_positions()
     if not joints:
         return jsonify({"error": "Cannot read joint positions"}), 503
+
     def cur(joint):
         for k, v in joints.items():
             if k.replace(".pos", "") == joint:
                 return float(v)
         return 0.0
+
     # Hardware: forward = shoulder increases, elbow decreases
     # Backward = shoulder decreases, elbow also decreases (extends to keep level)
     if direction == "forward":
@@ -461,16 +545,22 @@ def move_direction():
             for k in targets:
                 if direction == "forward" and k == "elbow_flex":
                     # Elbow leads shoulder on forward
-                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * min(1.0, t * 1.5)
+                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * min(
+                        1.0, t * 1.5
+                    )
                 elif direction == "backward" and k == "shoulder_lift":
                     # Shoulder leads elbow on backward
-                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * min(1.0, t * 1.5)
+                    action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * min(
+                        1.0, t * 1.5
+                    )
                 else:
                     action[f"{k}.pos"] = start[k] + (targets[k] - start[k]) * t
             with robot_lock:
                 robot.send_action(action)
             time.sleep(0.08)
-        return jsonify({"ok": True, "direction": direction, "degrees": degrees, "sent": targets})
+        return jsonify(
+            {"ok": True, "direction": direction, "degrees": degrees, "sent": targets}
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -482,7 +572,9 @@ def move_preset():
     data = request.json or {}
     name = data.get("pose")
     if name not in PRESETS:
-        return jsonify({"error": f"Unknown pose '{name}'. Options: {list(PRESETS.keys())}"}), 400
+        return jsonify(
+            {"error": f"Unknown pose '{name}'. Options: {list(PRESETS.keys())}"}
+        ), 400
     try:
         action = {f"{k}.pos": float(v) for k, v in PRESETS[name].items()}
         with robot_lock:
@@ -490,6 +582,7 @@ def move_preset():
         return jsonify({"ok": True, "pose": name, "joints": PRESETS[name]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/enable", methods=["POST"])
 def enable():
@@ -511,7 +604,9 @@ def enable():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # ---- Agent State ----
+
 
 @app.route("/detection_overlay", methods=["POST"])
 def push_detection_overlay():
@@ -524,6 +619,7 @@ def push_detection_overlay():
     detection_overlay["ts"] = time.time()
     return jsonify({"ok": True})
 
+
 @app.route("/detection_overlay", methods=["DELETE"])
 def clear_detection_overlay():
     """Clear the detection overlay."""
@@ -531,59 +627,77 @@ def clear_detection_overlay():
     detection_overlay["side"] = None
     return jsonify({"ok": True})
 
+
 # ---- Command Execution (runs yolo_ik_agent commands from dashboard) ----
 import threading
+
 _cmd_state = {"running": False, "command": "", "status": "idle", "log": []}
 _cmd_lock = threading.Lock()
 
 # Extrinsic calibration sample accumulator
 # Each entry: {"world": [right, fwd, z], "pixels": {"top": (u,v), "side": (u,v)}}
-_CALIB_EX_FILE = os.path.join(os.path.dirname(__file__), "calibration_data", "calib_ex_samples.json")
+_CALIB_EX_FILE = os.path.join(
+    os.path.dirname(__file__), "calibration_data", "calib_ex_samples.json"
+)
+
 
 def _load_calib_ex_samples():
-    import json
     try:
         with open(_CALIB_EX_FILE) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
+
 def _save_calib_ex_samples():
-    import json
     with open(_CALIB_EX_FILE, "w") as f:
         json.dump(_calib_ex_samples, f, indent=2)
         f.write("\n")
 
+
 _calib_ex_samples = _load_calib_ex_samples()
 
 # Arm offset calibration samples: each entry {"board": [x_m, y_m], "arm": [x_m, y_m]}
-_CALIB_ARM_FILE = os.path.join(os.path.dirname(__file__), "calibration_data", "calib_arm_samples.json")
+_CALIB_ARM_FILE = os.path.join(
+    os.path.dirname(__file__), "calibration_data", "calib_arm_samples.json"
+)
+
 
 def _load_calib_arm_samples():
-    import json
     try:
         with open(_CALIB_ARM_FILE) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
+
 def _save_calib_arm_samples():
-    import json
     with open(_CALIB_ARM_FILE, "w") as f:
         json.dump(_calib_arm_samples, f, indent=2)
         f.write("\n")
 
+
 _calib_arm_samples = _load_calib_arm_samples()
+
 
 def _run_command_thread(command):
     """Execute a yolo_ik_agent command in a background thread."""
-    import io, contextlib, re as _re
+    import re as _re
+
     try:
         from yolo_ik_agent import (
-            pickup_sequence, detect_and_locate, move_to_xyz,
-            move_preset, get_joint_angles, forward_kinematics,
-            urdf_to_physical, get_status, _send_joints, format_position
+            _send_joints,
+            detect_and_locate,
+            format_position,
+            forward_kinematics,
+            get_joint_angles,
+            get_status,
+            move_preset,
+            move_to_xyz,
+            pickup_sequence,
+            urdf_to_physical,
         )
+
         with _cmd_lock:
             _cmd_state["running"] = True
             _cmd_state["command"] = command
@@ -592,7 +706,7 @@ def _run_command_thread(command):
 
         def log(msg):
             # Strip ANSI codes
-            clean = _re.sub(r'\033\[[0-9;]*m', '', str(msg))
+            clean = _re.sub(r"\033\[[0-9;]*m", "", str(msg))
             with _cmd_lock:
                 _cmd_state["log"].append(clean)
             print(msg)
@@ -613,9 +727,9 @@ def _run_command_thread(command):
                 result = pickup_sequence(label)
                 if result is not None:
                     log(f"[cmd] Coordinates: {format_position(result)}")
-                    log(f"[cmd] Result: success")
+                    log("[cmd] Result: success")
                 else:
-                    log(f"[cmd] Result: failed")
+                    log("[cmd] Result: failed")
             else:
                 log("[cmd] Usage: /pick <object>")
         elif is_pick3d:
@@ -625,9 +739,9 @@ def _run_command_thread(command):
                 result = pickup_sequence(label, use_stereo=True)
                 if result is not None:
                     log(f"[cmd] Coordinates: {format_position(result)}")
-                    log(f"[cmd] Result: success")
+                    log("[cmd] Result: success")
                 else:
-                    log(f"[cmd] Result: failed")
+                    log("[cmd] Result: failed")
             else:
                 log("[cmd] Usage: /pick3d <object>")
         elif is_pickup:
@@ -639,8 +753,10 @@ def _run_command_thread(command):
                 for kw in pickup_kw:
                     idx = lower.find(kw)
                     if idx >= 0:
-                        target = command[idx + len(kw):].strip()
-                        target = _re.sub(r'^(the|a|an)\s+', '', target, flags=_re.IGNORECASE).strip()
+                        target = command[idx + len(kw) :].strip()
+                        target = _re.sub(
+                            r"^(the|a|an)\s+", "", target, flags=_re.IGNORECASE
+                        ).strip()
                         break
                 else:
                     target = command
@@ -656,6 +772,7 @@ def _run_command_thread(command):
             pos = detect_and_locate(label, use_triangulation=True)
             if pos is not None:
                 from yolo_ik_agent import format_position
+
                 log(f"[cmd] Position: {format_position(pos)}")
             else:
                 log("[cmd] Object not found")
@@ -665,6 +782,7 @@ def _run_command_thread(command):
             pos = detect_and_locate(label)
             if pos is not None:
                 from yolo_ik_agent import format_position
+
                 log(f"[cmd] Position: {format_position(pos)}")
             else:
                 log("[cmd] Object not found")
@@ -693,7 +811,9 @@ def _run_command_thread(command):
             if angles:
                 urdf_pos = forward_kinematics(angles)
                 phys = urdf_to_physical(urdf_pos)
-                log(f"[cmd] Gripper at: right={phys[0]*100:.1f}cm fwd={phys[1]*100:.1f}cm up={phys[2]*100:.1f}cm")
+                log(
+                    f"[cmd] Gripper at: right={phys[0] * 100:.1f}cm fwd={phys[1] * 100:.1f}cm up={phys[2] * 100:.1f}cm"
+                )
                 # Read gripper from status (not in FK chain)
                 grip_val = ""
                 try:
@@ -704,17 +824,31 @@ def _run_command_thread(command):
                             break
                 except Exception:
                     pass
-                log(f"[cmd] Joints: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}{grip_val}")
+                log(
+                    f"[cmd] Joints: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}{grip_val}"
+                )
         elif lower.startswith("/ik "):
             import numpy as _np
+
             from yolo_ik_agent import board_to_arm_full
+
             parts = command.split()
             if len(parts) == 4:
                 try:
-                    board_pos = _np.array([float(parts[1])/100, float(parts[2])/100, float(parts[3])/100])
+                    board_pos = _np.array(
+                        [
+                            float(parts[1]) / 100,
+                            float(parts[2]) / 100,
+                            float(parts[3]) / 100,
+                        ]
+                    )
                     arm_pos = board_to_arm_full(board_pos)
-                    log(f"[cmd] Board: right={board_pos[0]*100:.1f}cm fwd={board_pos[1]*100:.1f}cm up={board_pos[2]*100:.1f}cm")
-                    log(f"[cmd] Arm:   right={arm_pos[0]*100:.1f}cm fwd={arm_pos[1]*100:.1f}cm up={arm_pos[2]*100:.1f}cm")
+                    log(
+                        f"[cmd] Board: right={board_pos[0] * 100:.1f}cm fwd={board_pos[1] * 100:.1f}cm up={board_pos[2] * 100:.1f}cm"
+                    )
+                    log(
+                        f"[cmd] Arm:   right={arm_pos[0] * 100:.1f}cm fwd={arm_pos[1] * 100:.1f}cm up={arm_pos[2] * 100:.1f}cm"
+                    )
                     move_to_xyz(arm_pos)
                     log("[cmd] Done")
                 except ValueError:
@@ -741,7 +875,12 @@ def _run_command_thread(command):
                 enabled = False  # default toggle off
             try:
                 import requests as _req
-                _req.post(f"http://localhost:{PORT}/enable", json={"enabled": enabled}, timeout=5)
+
+                _req.post(
+                    f"http://localhost:{PORT}/enable",
+                    json={"enabled": enabled},
+                    timeout=5,
+                )
                 log(f"[cmd] Torque {'ON' if enabled else 'OFF'}")
             except Exception as e:
                 log(f"[cmd] Error: {e}")
@@ -754,20 +893,25 @@ def _run_command_thread(command):
                 pos = detect_and_locate(label, use_triangulation=True)
                 if pos is not None:
                     from yolo_ik_agent import format_position
+
                     log(f"[cmd] Object at: {format_position(pos)}")
-                    log(f"[cmd] Moving to home first...")
+                    log("[cmd] Moving to home first...")
                     move_preset("home")
-                    import time as _time; _time.sleep(0.5)
+                    import time as _time
+
+                    _time.sleep(0.5)
                     _send_joints({"gripper": 100})
                     _time.sleep(0.5)
-                    log(f"[cmd] Moving to target...")
+                    log("[cmd] Moving to target...")
                     move_to_xyz(pos)
-                    log(f"[cmd] Done — check gripper alignment")
+                    log("[cmd] Done — check gripper alignment")
                 else:
                     log("[cmd] Object not found")
         elif lower.startswith("/autofocus"):
-            import cv2, numpy as np
             import time as _time
+
+            import cv2
+            import numpy as np
 
             # Sweep focus 0-255 in steps, measure sharpness, pick the best
             step = 5
@@ -812,13 +956,15 @@ def _run_command_thread(command):
                 # Lock to best
                 cap.set(cv2.CAP_PROP_FOCUS, best_focus)
                 focus_results[cam_name] = best_focus
-                log(f"[cmd] {cam_name}: best focus={best_focus} (sharpness={best_sharpness:.0f})")
+                log(
+                    f"[cmd] {cam_name}: best focus={best_focus} (sharpness={best_sharpness:.0f})"
+                )
 
             # Save to cameras.json
             try:
                 for cam_name, focus_val in focus_results.items():
                     cameras_config.set_focus(cam_name, focus_val)
-                log(f"[cmd] Saved focus values to cameras.json")
+                log("[cmd] Saved focus values to cameras.json")
             except Exception as e:
                 log(f"[cmd] Warning: could not save to cameras.json: {e}")
             log("[cmd] Autofocus complete")
@@ -837,7 +983,9 @@ def _run_command_thread(command):
                     log("[cmd] No arm calibration samples collected")
                 else:
                     for i, s in enumerate(_calib_arm_samples):
-                        log(f"[cmd]   #{i+1}: board=({s['board'][0]*100:.1f}, {s['board'][1]*100:.1f})cm  arm=({s['arm'][0]*100:.1f}, {s['arm'][1]*100:.1f})cm  offset=({(s['board'][0]-s['arm'][0])*100:.1f}, {(s['board'][1]-s['arm'][1])*100:.1f})cm")
+                        log(
+                            f"[cmd]   #{i + 1}: board=({s['board'][0] * 100:.1f}, {s['board'][1] * 100:.1f})cm  arm=({s['arm'][0] * 100:.1f}, {s['arm'][1] * 100:.1f})cm  offset=({(s['board'][0] - s['arm'][0]) * 100:.1f}, {(s['board'][1] - s['arm'][1]) * 100:.1f})cm"
+                        )
                     log(f"[cmd] {len(_calib_arm_samples)} sample(s). Need 1+ to solve.")
             elif args_lower.startswith("del"):
                 del_parts = args_str.split()
@@ -849,30 +997,49 @@ def _run_command_thread(command):
                         if 0 <= idx < len(_calib_arm_samples):
                             removed = _calib_arm_samples.pop(idx)
                             _save_calib_arm_samples()
-                            log(f"[cmd] Deleted sample #{idx+1}: board=({removed['board'][0]*100:.1f}, {removed['board'][1]*100:.1f})cm")
+                            log(
+                                f"[cmd] Deleted sample #{idx + 1}: board=({removed['board'][0] * 100:.1f}, {removed['board'][1] * 100:.1f})cm"
+                            )
                         else:
-                            log(f"[cmd] Invalid sample number (have {len(_calib_arm_samples)} samples)")
+                            log(
+                                f"[cmd] Invalid sample number (have {len(_calib_arm_samples)} samples)"
+                            )
                     except ValueError:
                         log("[cmd] Usage: /calib_arm del <number>")
             elif args_lower == "solve":
                 if len(_calib_arm_samples) < 1:
                     log("[cmd] Need at least 1 sample. Use: /calib_arm <x_cm> <y_cm>")
                 else:
-                    offsets = np.array([[s["board"][0] - s["arm"][0], s["board"][1] - s["arm"][1]] for s in _calib_arm_samples])
+                    offsets = np.array(
+                        [
+                            [s["board"][0] - s["arm"][0], s["board"][1] - s["arm"][1]]
+                            for s in _calib_arm_samples
+                        ]
+                    )
                     mean_offset = offsets.mean(axis=0)
-                    log(f"[cmd] Computed arm offset from {len(_calib_arm_samples)} sample(s):")
-                    log(f"[cmd]   X (right) = {mean_offset[0]*100:.2f} cm")
-                    log(f"[cmd]   Y (fwd)   = {mean_offset[1]*100:.2f} cm")
+                    log(
+                        f"[cmd] Computed arm offset from {len(_calib_arm_samples)} sample(s):"
+                    )
+                    log(f"[cmd]   X (right) = {mean_offset[0] * 100:.2f} cm")
+                    log(f"[cmd]   Y (fwd)   = {mean_offset[1] * 100:.2f} cm")
                     if len(_calib_arm_samples) >= 2:
                         std = offsets.std(axis=0)
-                        log(f"[cmd]   Std dev: X={std[0]*100:.2f}cm  Y={std[1]*100:.2f}cm")
+                        log(
+                            f"[cmd]   Std dev: X={std[0] * 100:.2f}cm  Y={std[1] * 100:.2f}cm"
+                        )
                     # Save to cameras.json, preserving arm_offset[2]
                     try:
                         z_val = cameras_config.get_arm_offset()[2]
-                        new_offset = [round(float(mean_offset[0]), 6), round(float(mean_offset[1]), 6), z_val]
+                        new_offset = [
+                            round(float(mean_offset[0]), 6),
+                            round(float(mean_offset[1]), 6),
+                            z_val,
+                        ]
                         cameras_config.set_arm_offset(new_offset)
-                        log(f"[cmd] Saved arm_offset to cameras.json: [{new_offset[0]*100:.2f}, {new_offset[1]*100:.2f}, {z_val*100:.2f}] cm")
-                        log(f"[cmd] Restart server for this to take effect")
+                        log(
+                            f"[cmd] Saved arm_offset to cameras.json: [{new_offset[0] * 100:.2f}, {new_offset[1] * 100:.2f}, {z_val * 100:.2f}] cm"
+                        )
+                        log("[cmd] Restart server for this to take effect")
                     except Exception as e:
                         log(f"[cmd] Error saving to cameras.json: {e}")
             elif args_str:
@@ -885,32 +1052,48 @@ def _run_command_thread(command):
                         # Get current gripper position via FK
                         angles = get_joint_angles()
                         if not angles:
-                            log("[cmd] Cannot read joint angles — is the arm connected?")
+                            log(
+                                "[cmd] Cannot read joint angles — is the arm connected?"
+                            )
                         else:
                             urdf_pos = forward_kinematics(angles)
                             arm_phys = urdf_to_physical(urdf_pos)
-                            sample = {"board": [board_x, board_y], "arm": [float(arm_phys[0]), float(arm_phys[1])]}
+                            sample = {
+                                "board": [board_x, board_y],
+                                "arm": [float(arm_phys[0]), float(arm_phys[1])],
+                            }
                             _calib_arm_samples.append(sample)
                             _save_calib_arm_samples()
                             offset_x = board_x - arm_phys[0]
                             offset_y = board_y - arm_phys[1]
-                            log(f"[cmd] Sample #{len(_calib_arm_samples)}: board=({board_x*100:.1f}, {board_y*100:.1f})cm  arm=({arm_phys[0]*100:.1f}, {arm_phys[1]*100:.1f})cm  offset=({offset_x*100:.1f}, {offset_y*100:.1f})cm")
-                            log(f"[cmd] {len(_calib_arm_samples)} sample(s) collected. Use /calib_arm solve when ready.")
+                            log(
+                                f"[cmd] Sample #{len(_calib_arm_samples)}: board=({board_x * 100:.1f}, {board_y * 100:.1f})cm  arm=({arm_phys[0] * 100:.1f}, {arm_phys[1] * 100:.1f})cm  offset=({offset_x * 100:.1f}, {offset_y * 100:.1f})cm"
+                            )
+                            log(
+                                f"[cmd] {len(_calib_arm_samples)} sample(s) collected. Use /calib_arm solve when ready."
+                            )
                     except ValueError:
                         log("[cmd] Usage: /calib_arm <x_cm> <y_cm>")
                 else:
                     log("[cmd] Usage: /calib_arm <x_cm> <y_cm>")
             else:
-                log("[cmd] Arm offset calibration — place gripper tip on a known board position")
-                log("[cmd]   /calib_arm <x_cm> <y_cm>   Collect sample (x=right, y=forward)")
+                log(
+                    "[cmd] Arm offset calibration — place gripper tip on a known board position"
+                )
+                log(
+                    "[cmd]   /calib_arm <x_cm> <y_cm>   Collect sample (x=right, y=forward)"
+                )
                 log("[cmd]   /calib_arm status           Show collected samples")
                 log("[cmd]   /calib_arm solve            Compute & save arm_offset")
                 log("[cmd]   /calib_arm del <n>          Delete sample #n")
                 log("[cmd]   /calib_arm clear            Clear all samples")
         elif lower.startswith("/calib_ex"):
-            import cv2, numpy as np
+            import cv2
+            import numpy as np
+            from cameras import get_scaled_intrinsics, update_camera
+            from cameras import reload as reload_cameras
             from detect import detect_objects
-            from cameras import get_intrinsics, get_scaled_intrinsics, update_camera, reload as reload_cameras
+
             from yolo_ik_agent import get_surface_z
 
             args_str = command.split(None, 1)[1].strip() if " " in command else ""
@@ -923,16 +1106,22 @@ def _run_command_thread(command):
                         arm_r = float(arm_parts[1]) / 100.0
                         arm_f = float(arm_parts[2]) / 100.0
                         cameras_config.set_arm_offset([arm_r, arm_f])
-                        log(f"[cmd] Arm offset set: right={arm_r*100:.1f}cm fwd={arm_f*100:.1f}cm")
-                        log(f"[cmd] Detection results will be converted: arm_pos = board_pos - ({arm_r*100:.1f}, {arm_f*100:.1f})")
-                        log(f"[cmd] Restart server for this to take effect")
+                        log(
+                            f"[cmd] Arm offset set: right={arm_r * 100:.1f}cm fwd={arm_f * 100:.1f}cm"
+                        )
+                        log(
+                            f"[cmd] Detection results will be converted: arm_pos = board_pos - ({arm_r * 100:.1f}, {arm_f * 100:.1f})"
+                        )
+                        log("[cmd] Restart server for this to take effect")
                     except ValueError:
                         log("[cmd] Usage: /calib_ex arm <right_cm> <fwd_cm>")
                 else:
                     # Show current offset
                     try:
                         offset = cameras_config.get_arm_offset()
-                        log(f"[cmd] Current arm offset: right={offset[0]*100:.1f}cm fwd={offset[1]*100:.1f}cm")
+                        log(
+                            f"[cmd] Current arm offset: right={offset[0] * 100:.1f}cm fwd={offset[1] * 100:.1f}cm"
+                        )
                     except Exception:
                         log("[cmd] No arm offset configured")
                     log("[cmd] Usage: /calib_ex arm <right_cm> <fwd_cm>")
@@ -951,32 +1140,53 @@ def _run_command_thread(command):
                             removed = _calib_ex_samples.pop(idx - 1)
                             _save_calib_ex_samples()
                             w = removed["world"]
-                            log(f"[cmd] Deleted sample {idx} (right={w[0]*100:.1f}cm fwd={w[1]*100:.1f}cm). {len(_calib_ex_samples)} remaining.")
+                            log(
+                                f"[cmd] Deleted sample {idx} (right={w[0] * 100:.1f}cm fwd={w[1] * 100:.1f}cm). {len(_calib_ex_samples)} remaining."
+                            )
                         else:
-                            log(f"[cmd] Invalid sample number. Have {len(_calib_ex_samples)} samples (1-{len(_calib_ex_samples)}).")
+                            log(
+                                f"[cmd] Invalid sample number. Have {len(_calib_ex_samples)} samples (1-{len(_calib_ex_samples)})."
+                            )
                     except ValueError:
                         log("[cmd] Usage: /calib_ex del <number>")
             elif args_lower == "status":
                 log(f"[cmd] {len(_calib_ex_samples)} sample(s) collected")
                 for i, s in enumerate(_calib_ex_samples):
                     w = s["world"]
-                    cams = ", ".join(f"{k}=({int(v[0])},{int(v[1])})" for k, v in s["pixels"].items())
-                    log(f"[cmd]   {i+1}: right={w[0]*100:.1f}cm fwd={w[1]*100:.1f}cm → {cams}")
+                    cams = ", ".join(
+                        f"{k}=({int(v[0])},{int(v[1])})" for k, v in s["pixels"].items()
+                    )
+                    log(
+                        f"[cmd]   {i + 1}: right={w[0] * 100:.1f}cm fwd={w[1] * 100:.1f}cm → {cams}"
+                    )
             elif args_lower == "solve":
                 if len(_calib_ex_samples) < 4:
-                    log(f"[cmd] Need at least 4 samples (have {len(_calib_ex_samples)}). Add more with /calib_ex <right_cm> <fwd_cm>")
+                    log(
+                        f"[cmd] Need at least 4 samples (have {len(_calib_ex_samples)}). Add more with /calib_ex <right_cm> <fwd_cm>"
+                    )
                 else:
-                    log(f"[cmd] Solving extrinsics from {len(_calib_ex_samples)} samples...")
+                    log(
+                        f"[cmd] Solving extrinsics from {len(_calib_ex_samples)} samples..."
+                    )
                     for cam_name in ["top", "side"]:
                         # Collect samples that have this camera
-                        cam_samples = [(s["world"], s["pixels"][cam_name])
-                                       for s in _calib_ex_samples if cam_name in s["pixels"]]
+                        cam_samples = [
+                            (s["world"], s["pixels"][cam_name])
+                            for s in _calib_ex_samples
+                            if cam_name in s["pixels"]
+                        ]
                         if len(cam_samples) < 4:
-                            log(f"[cmd] {cam_name}: only {len(cam_samples)} samples, need 4+. Skipping.")
+                            log(
+                                f"[cmd] {cam_name}: only {len(cam_samples)} samples, need 4+. Skipping."
+                            )
                             continue
 
-                        world_pts = np.array([s[0] for s in cam_samples], dtype=np.float64)
-                        img_pts = np.array([s[1] for s in cam_samples], dtype=np.float64)
+                        world_pts = np.array(
+                            [s[0] for s in cam_samples], dtype=np.float64
+                        )
+                        img_pts = np.array(
+                            [s[1] for s in cam_samples], dtype=np.float64
+                        )
 
                         # Get a snapshot to know actual frame size
                         b64_frame, err = capture_snapshot(cam_name)
@@ -984,12 +1194,14 @@ def _run_command_thread(command):
                             log(f"[cmd] {cam_name}: cannot get snapshot: {err}")
                             continue
                         img_bytes = base64.b64decode(b64_frame)
-                        frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                        frame = cv2.imdecode(
+                            np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR
+                        )
                         fh, fw = frame.shape[:2]
                         cam_matrix, cam_dist = get_scaled_intrinsics(cam_name, fw, fh)
 
                         # solvePnP: try multiple methods, pick best
-                        best_rvec, best_tvec, best_err = None, None, float('inf')
+                        best_rvec, best_tvec, best_err = None, None, float("inf")
                         methods = [
                             ("IPPE", cv2.SOLVEPNP_IPPE),
                             ("ITERATIVE", cv2.SOLVEPNP_ITERATIVE),
@@ -1001,13 +1213,22 @@ def _run_command_thread(command):
                                 ok, rv, tv = cv2.solvePnP(
                                     world_pts.reshape(-1, 1, 3),
                                     img_pts.reshape(-1, 1, 2),
-                                    cam_matrix, cam_dist,
-                                    flags=method_flag
+                                    cam_matrix,
+                                    cam_dist,
+                                    flags=method_flag,
                                 )
                                 if ok:
-                                    proj, _ = cv2.projectPoints(world_pts, rv, tv, cam_matrix, cam_dist)
-                                    err = np.mean(np.linalg.norm(proj.reshape(-1, 2) - img_pts, axis=1))
-                                    log(f"[cmd] {cam_name} {method_name}: {err:.1f}px reproj error")
+                                    proj, _ = cv2.projectPoints(
+                                        world_pts, rv, tv, cam_matrix, cam_dist
+                                    )
+                                    err = np.mean(
+                                        np.linalg.norm(
+                                            proj.reshape(-1, 2) - img_pts, axis=1
+                                        )
+                                    )
+                                    log(
+                                        f"[cmd] {cam_name} {method_name}: {err:.1f}px reproj error"
+                                    )
                                     if err < best_err:
                                         best_err = err
                                         best_rvec, best_tvec = rv, tv
@@ -1023,8 +1244,10 @@ def _run_command_thread(command):
                             best_rvec, best_tvec = cv2.solvePnPRefineVVS(
                                 world_pts.reshape(-1, 1, 3),
                                 img_pts.reshape(-1, 1, 2),
-                                cam_matrix, cam_dist,
-                                best_rvec, best_tvec
+                                cam_matrix,
+                                cam_dist,
+                                best_rvec,
+                                best_tvec,
                             )
                         except Exception:
                             pass
@@ -1035,20 +1258,29 @@ def _run_command_thread(command):
                         R_world = R_cam.T
                         optical_axis = R_world @ np.array([0.0, 0.0, 1.0])
                         pitch_deg = float(np.degrees(np.arcsin(optical_axis[2])))
-                        yaw_deg = float(np.degrees(np.arctan2(optical_axis[0], optical_axis[1])))
+                        yaw_deg = float(
+                            np.degrees(np.arctan2(optical_axis[0], optical_axis[1]))
+                        )
 
                         # Per-sample reprojection errors
-                        proj, _ = cv2.projectPoints(world_pts, best_rvec, best_tvec, cam_matrix, cam_dist)
+                        proj, _ = cv2.projectPoints(
+                            world_pts, best_rvec, best_tvec, cam_matrix, cam_dist
+                        )
                         errors = np.linalg.norm(proj.reshape(-1, 2) - img_pts, axis=1)
                         for i, e in enumerate(errors):
                             marker = " *** OUTLIER" if e > 15 else ""
-                            log(f"[cmd]   sample {i+1}: {e:.1f}px{marker}")
+                            log(f"[cmd]   sample {i + 1}: {e:.1f}px{marker}")
 
-                        log(f"[cmd] {cam_name}: position right={cam_pos[0]*100:+.1f}cm fwd={cam_pos[1]*100:+.1f}cm up={cam_pos[2]*100:+.1f}cm")
-                        log(f"[cmd] {cam_name}: yaw={yaw_deg:.1f}° pitch={pitch_deg:.1f}° reproj={best_err:.1f}px")
+                        log(
+                            f"[cmd] {cam_name}: position right={cam_pos[0] * 100:+.1f}cm fwd={cam_pos[1] * 100:+.1f}cm up={cam_pos[2] * 100:+.1f}cm"
+                        )
+                        log(
+                            f"[cmd] {cam_name}: yaw={yaw_deg:.1f}° pitch={pitch_deg:.1f}° reproj={best_err:.1f}px"
+                        )
 
                         # Save
-                        update_camera(cam_name,
+                        update_camera(
+                            cam_name,
                             position=cam_pos.tolist(),
                             yaw=round(yaw_deg, 1),
                             pitch=round(pitch_deg, 1),
@@ -1068,12 +1300,16 @@ def _run_command_thread(command):
                         right_m = float(parts[0]) / 100.0
                         fwd_m = float(parts[1]) / 100.0
                     except ValueError:
-                        log("[cmd] Invalid coordinates. Usage: /calib_ex <right_cm> <fwd_cm>")
+                        log(
+                            "[cmd] Invalid coordinates. Usage: /calib_ex <right_cm> <fwd_cm>"
+                        )
                         right_m = None
 
                     if right_m is not None:
                         world_pt = [right_m, fwd_m, get_surface_z()]
-                        log(f"[cmd] Detecting red block at right={right_m*100:.1f}cm fwd={fwd_m*100:.1f}cm...")
+                        log(
+                            f"[cmd] Detecting red block at right={right_m * 100:.1f}cm fwd={fwd_m * 100:.1f}cm..."
+                        )
                         sample = {"world": world_pt, "pixels": {}}
 
                         for cam_name in ["top", "side"]:
@@ -1082,7 +1318,9 @@ def _run_command_thread(command):
                                 log(f"[cmd] {cam_name}: snapshot failed: {err}")
                                 continue
                             img_bytes = base64.b64decode(b64_frame)
-                            frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                            frame = cv2.imdecode(
+                                np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR
+                            )
 
                             dets = detect_objects(frame, "red block")
                             if not dets:
@@ -1094,29 +1332,53 @@ def _run_command_thread(command):
                             cx, cy = best["center"]
                             conf = best["confidence"]
                             sample["pixels"][cam_name] = (float(cx), float(cy))
-                            log(f"[cmd] {cam_name}: detected at pixel ({int(cx)}, {int(cy)}) conf={conf:.2f}")
+                            log(
+                                f"[cmd] {cam_name}: detected at pixel ({int(cx)}, {int(cy)}) conf={conf:.2f}"
+                            )
 
                             # Draw detection on frame and push to overlay
                             x1, y1, x2, y2 = [int(v) for v in best["bbox"]]
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                             cv2.circle(frame, (int(cx), int(cy)), 5, (0, 0, 255), -1)
-                            label_text = f"red block ({conf:.0%}) #{len(_calib_ex_samples)+1}"
-                            cv2.putText(frame, label_text, (x1, y1 - 8),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                            _, overlay_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                            detection_overlay[cam_name] = base64.b64encode(overlay_buf.tobytes()).decode("utf-8")
+                            label_text = (
+                                f"red block ({conf:.0%}) #{len(_calib_ex_samples) + 1}"
+                            )
+                            cv2.putText(
+                                frame,
+                                label_text,
+                                (x1, y1 - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (0, 255, 0),
+                                2,
+                            )
+                            _, overlay_buf = cv2.imencode(
+                                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
+                            )
+                            detection_overlay[cam_name] = base64.b64encode(
+                                overlay_buf.tobytes()
+                            ).decode("utf-8")
                             detection_overlay["ts"] = time.time()
 
                         if sample["pixels"]:
                             _calib_ex_samples.append(sample)
                             _save_calib_ex_samples()
-                            log(f"[cmd] Sample {len(_calib_ex_samples)} added ({len(_calib_ex_samples)}/4 min). Samples:")
+                            log(
+                                f"[cmd] Sample {len(_calib_ex_samples)} added ({len(_calib_ex_samples)}/4 min). Samples:"
+                            )
                             for i, s in enumerate(_calib_ex_samples):
                                 w = s["world"]
-                                cams = ", ".join(f"{k}=({int(v[0])},{int(v[1])})" for k, v in s["pixels"].items())
-                                log(f"[cmd]   {i+1}: right={w[0]*100:.1f}cm fwd={w[1]*100:.1f}cm → {cams}")
+                                cams = ", ".join(
+                                    f"{k}=({int(v[0])},{int(v[1])})"
+                                    for k, v in s["pixels"].items()
+                                )
+                                log(
+                                    f"[cmd]   {i + 1}: right={w[0] * 100:.1f}cm fwd={w[1] * 100:.1f}cm → {cams}"
+                                )
                         else:
-                            log("[cmd] No detections in any camera. Try repositioning the block.")
+                            log(
+                                "[cmd] No detections in any camera. Try repositioning the block."
+                            )
             else:
                 log("[cmd] Usage: /calib_ex <right_cm> <fwd_cm>  — capture a sample")
                 log("[cmd]   /calib_ex solve   — compute extrinsics from samples")
@@ -1134,6 +1396,7 @@ def _run_command_thread(command):
             _cmd_state["running"] = False
             _cmd_state["status"] = "done"
 
+
 @app.route("/run_command", methods=["POST"])
 def run_command():
     """Run a yolo_ik_agent command from the dashboard."""
@@ -1148,11 +1411,13 @@ def run_command():
     t.start()
     return jsonify({"ok": True, "command": command})
 
+
 @app.route("/run_command", methods=["GET"])
 def get_command_state():
     """Get the current command execution state."""
     with _cmd_lock:
         return jsonify(dict(_cmd_state))
+
 
 @app.route("/agent_state", methods=["POST"])
 def update_agent_state():
@@ -1166,6 +1431,7 @@ def update_agent_state():
         agent_state["confirm_result"] = None
     return jsonify({"ok": True})
 
+
 @app.route("/confirm_grip", methods=["POST"])
 def confirm_grip():
     """Dashboard sends grip confirmation."""
@@ -1175,7 +1441,9 @@ def confirm_grip():
     agent_state["confirm_pending"] = False
     return jsonify({"ok": True, "confirm": result})
 
+
 # ---- Teleop ----
+
 
 @app.route("/teleop", methods=["POST"])
 def teleop():
@@ -1186,21 +1454,28 @@ def teleop():
         ok, msg = arms_config.start_teleop(robot, robot_lock)
         if ok:
             torque_enabled = True
-        return jsonify({"ok": ok, "message": msg, "teleop_active": arms_config.is_teleop_active()})
+        return jsonify(
+            {"ok": ok, "message": msg, "teleop_active": arms_config.is_teleop_active()}
+        )
     elif action == "stop":
         ok, msg = arms_config.stop_teleop()
-        return jsonify({"ok": ok, "message": msg, "teleop_active": arms_config.is_teleop_active()})
+        return jsonify(
+            {"ok": ok, "message": msg, "teleop_active": arms_config.is_teleop_active()}
+        )
     else:
         return jsonify({"teleop_active": arms_config.is_teleop_active()})
+
 
 # ---- Calibration ----
 
 # Floor drop value — can be set by agent or dashboard
 floor_drop = None
 
+
 @app.route("/calibration", methods=["GET"])
 def get_calibration():
     return jsonify({"floor_drop": floor_drop})
+
 
 @app.route("/calibration", methods=["POST"])
 def set_calibration():
@@ -1209,12 +1484,17 @@ def set_calibration():
     if "floor_drop" in data:
         val = data["floor_drop"]
         floor_drop = float(val) if val is not None else None
-        print(f"{C.CYAN}[calib]{C.RESET} Floor drop set to {floor_drop}°" if floor_drop else f"{C.YELLOW}[calib]{C.RESET} Floor drop cleared")
+        print(
+            f"{C.CYAN}[calib]{C.RESET} Floor drop set to {floor_drop}°"
+            if floor_drop
+            else f"{C.YELLOW}[calib]{C.RESET} Floor drop cleared"
+        )
         return jsonify({"ok": True, "floor_drop": floor_drop})
     return jsonify({"error": "Provide 'floor_drop'"}), 400
 
 
 # ---- History ----
+
 
 @app.route("/timeline", methods=["POST"])
 def toggle_timeline():
@@ -1224,8 +1504,11 @@ def toggle_timeline():
         history_enabled = bool(data["enabled"])
     else:
         history_enabled = not history_enabled
-    print(f"{C.CYAN}[timeline]{C.RESET} Recording {'enabled' if history_enabled else 'disabled'}")
+    print(
+        f"{C.CYAN}[timeline]{C.RESET} Recording {'enabled' if history_enabled else 'disabled'}"
+    )
     return jsonify({"ok": True, "history_enabled": history_enabled})
+
 
 @app.route("/history")
 def get_history():
@@ -1242,6 +1525,7 @@ def get_history():
         step = len(data) // 3000
         data = data[::step]
     return jsonify({"samples": len(data), "data": data})
+
 
 @app.route("/history/goto", methods=["POST"])
 def history_goto():
@@ -1263,6 +1547,7 @@ def history_goto():
 
 # ---- Chat ----
 
+
 @app.route("/chat", methods=["GET"])
 def get_chat():
     """Get chat messages. Pass ?since=ID to get only new messages."""
@@ -1270,6 +1555,7 @@ def get_chat():
     with chat_lock:
         msgs = [m for m in chat_log if m["id"] > since]
     return jsonify({"messages": msgs})
+
 
 @app.route("/chat", methods=["POST"])
 def post_chat():
@@ -1281,10 +1567,17 @@ def post_chat():
         return jsonify({"error": "Empty message"}), 400
     with chat_lock:
         chat_id_counter += 1
-        msg = {"role": "user", "text": text, "ts": time.time(), "id": chat_id_counter, "source": "dashboard"}
+        msg = {
+            "role": "user",
+            "text": text,
+            "ts": time.time(),
+            "id": chat_id_counter,
+            "source": "dashboard",
+        }
         chat_log.append(msg)
         chat_pending.append(text)
     return jsonify({"ok": True, "id": msg["id"]})
+
 
 @app.route("/chat/push", methods=["POST"])
 def push_chat():
@@ -1304,6 +1597,7 @@ def push_chat():
             chat_log[:] = chat_log[-200:]
     return jsonify({"ok": True, "id": msg["id"]})
 
+
 @app.route("/chat/pending", methods=["GET"])
 def get_pending():
     """Agent polls for messages submitted from the dashboard."""
@@ -1314,6 +1608,7 @@ def get_pending():
 
 
 # ---- Diagnostics ----
+
 
 def run_diagnostics():
     """Run startup diagnostics and print colored pass/fail summary."""
@@ -1353,14 +1648,15 @@ def run_diagnostics():
     # 3. Top camera
     print(f"  {C.BLUE}[3/4]{C.RESET} Top camera...........", end=" ")
     if "top" in cameras:
-        import cv2
         cam = cameras["top"]
         for _ in range(4):
             cam.grab()
         ret, frame = cam.read()
         if ret and frame is not None:
             h, w = frame.shape[:2]
-            print(f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('top', {}).get('index', '?')})")
+            print(
+                f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('top', {}).get('index', '?')})"
+            )
         else:
             print(f"{C.RED}FAIL{C.RESET} — opened but cannot read frames")
             errors.append("Top camera opened but frame read failed")
@@ -1371,14 +1667,15 @@ def run_diagnostics():
     # 4. Side camera
     print(f"  {C.BLUE}[4/4]{C.RESET} Side camera..........", end=" ")
     if "side" in cameras:
-        import cv2
         cam = cameras["side"]
         for _ in range(4):
             cam.grab()
         ret, frame = cam.read()
         if ret and frame is not None:
             h, w = frame.shape[:2]
-            print(f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('side', {}).get('index', '?')})")
+            print(
+                f"{C.GREEN}OK{C.RESET} ({w}x{h}, index {camera_info.get('side', {}).get('index', '?')})"
+            )
         else:
             print(f"{C.RED}FAIL{C.RESET} — opened but cannot read frames")
             errors.append("Side camera opened but frame read failed")
@@ -1404,18 +1701,23 @@ def run_diagnostics():
 # ---- Main ----
 if __name__ == "__main__":
     print(f"\n{C.BLUE}[boot]{C.RESET} Starting SO-101 Robot Agent Server...")
-    print(f"{C.DIM}[boot] Follower serial: {ROBOT_SERIAL}, leader serial: {LEADER_SERIAL}{C.RESET}")
+    print(
+        f"{C.DIM}[boot] Follower serial: {ROBOT_SERIAL}, leader serial: {LEADER_SERIAL}{C.RESET}"
+    )
     init_robot()
     init_cameras()
     # Start background history recorder
     threading.Thread(target=history_recorder, daemon=True).start()
-    print(f"{C.GREEN}[boot]{C.RESET} History recorder started (sampling every {HISTORY_INTERVAL}s, {HISTORY_MAX_SECS//60}min buffer)")
+    print(
+        f"{C.GREEN}[boot]{C.RESET} History recorder started (sampling every {HISTORY_INTERVAL}s, {HISTORY_MAX_SECS // 60}min buffer)"
+    )
     run_diagnostics()
     # Move arm to rest position on startup (direct servo control, no HTTP)
     if robot is not None:
         print(f"{C.BLUE}[boot]{C.RESET} Moving arm to rest position...")
         try:
             import time as _time
+
             rest = PRESETS["rest"]
             # Read current positions
             obs = robot.get_observation()
