@@ -749,6 +749,25 @@ def _save_calib_ex_samples():
 
 _calib_ex_samples = _load_calib_ex_samples()
 
+# Arm offset calibration samples: each entry {"board": [x_m, y_m], "arm": [x_m, y_m]}
+_CALIB_ARM_FILE = os.path.join(os.path.dirname(__file__), "calibration_data", "calib_arm_samples.json")
+
+def _load_calib_arm_samples():
+    import json
+    try:
+        with open(_CALIB_ARM_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def _save_calib_arm_samples():
+    import json
+    with open(_CALIB_ARM_FILE, "w") as f:
+        json.dump(_calib_arm_samples, f, indent=2)
+        f.write("\n")
+
+_calib_arm_samples = _load_calib_arm_samples()
+
 def _run_command_thread(command):
     """Execute a yolo_ik_agent command in a background thread."""
     import io, contextlib, re as _re
@@ -868,7 +887,17 @@ def _run_command_thread(command):
                 urdf_pos = forward_kinematics(angles)
                 phys = urdf_to_physical(urdf_pos)
                 log(f"[cmd] Gripper at: right={phys[0]*100:.1f}cm fwd={phys[1]*100:.1f}cm up={phys[2]*100:.1f}cm")
-                log(f"[cmd] Joints: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}")
+                # Read gripper from status (not in FK chain)
+                grip_val = ""
+                try:
+                    status = get_status()
+                    for k, v in status.get("joints", {}).items():
+                        if "gripper" in k:
+                            grip_val = f" gripper={float(v):.1f}"
+                            break
+                except Exception:
+                    pass
+                log(f"[cmd] Joints: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}{grip_val}")
         elif lower.startswith("/ik "):
             import numpy as _np
             from yolo_ik_agent import board_to_arm_full
@@ -994,6 +1023,97 @@ def _run_command_thread(command):
             except Exception as e:
                 log(f"[cmd] Warning: could not save to cameras.json: {e}")
             log("[cmd] Autofocus complete")
+        elif lower.startswith("/calib_arm"):
+            import numpy as np, json, os
+
+            args_str = command.split(None, 1)[1].strip() if " " in command else ""
+            args_lower = args_str.lower()
+
+            if args_lower == "clear":
+                _calib_arm_samples.clear()
+                _save_calib_arm_samples()
+                log("[cmd] Cleared all arm calibration samples")
+            elif args_lower == "status":
+                if not _calib_arm_samples:
+                    log("[cmd] No arm calibration samples collected")
+                else:
+                    for i, s in enumerate(_calib_arm_samples):
+                        log(f"[cmd]   #{i+1}: board=({s['board'][0]*100:.1f}, {s['board'][1]*100:.1f})cm  arm=({s['arm'][0]*100:.1f}, {s['arm'][1]*100:.1f})cm  offset=({(s['board'][0]-s['arm'][0])*100:.1f}, {(s['board'][1]-s['arm'][1])*100:.1f})cm")
+                    log(f"[cmd] {len(_calib_arm_samples)} sample(s). Need 1+ to solve.")
+            elif args_lower.startswith("del"):
+                del_parts = args_str.split()
+                if len(del_parts) < 2:
+                    log("[cmd] Usage: /calib_arm del <number>")
+                else:
+                    try:
+                        idx = int(del_parts[1]) - 1
+                        if 0 <= idx < len(_calib_arm_samples):
+                            removed = _calib_arm_samples.pop(idx)
+                            _save_calib_arm_samples()
+                            log(f"[cmd] Deleted sample #{idx+1}: board=({removed['board'][0]*100:.1f}, {removed['board'][1]*100:.1f})cm")
+                        else:
+                            log(f"[cmd] Invalid sample number (have {len(_calib_arm_samples)} samples)")
+                    except ValueError:
+                        log("[cmd] Usage: /calib_arm del <number>")
+            elif args_lower == "solve":
+                if len(_calib_arm_samples) < 1:
+                    log("[cmd] Need at least 1 sample. Use: /calib_arm <x_cm> <y_cm>")
+                else:
+                    offsets = np.array([[s["board"][0] - s["arm"][0], s["board"][1] - s["arm"][1]] for s in _calib_arm_samples])
+                    mean_offset = offsets.mean(axis=0)
+                    log(f"[cmd] Computed arm offset from {len(_calib_arm_samples)} sample(s):")
+                    log(f"[cmd]   X (right) = {mean_offset[0]*100:.2f} cm")
+                    log(f"[cmd]   Y (fwd)   = {mean_offset[1]*100:.2f} cm")
+                    if len(_calib_arm_samples) >= 2:
+                        std = offsets.std(axis=0)
+                        log(f"[cmd]   Std dev: X={std[0]*100:.2f}cm  Y={std[1]*100:.2f}cm")
+                    # Save to cameras.json, preserving arm_offset[2]
+                    cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
+                    try:
+                        with open(cam_json_path, "r") as f:
+                            cam_data = json.load(f)
+                        old_offset = cam_data.get("arm_offset", [0, 0, 0])
+                        z_val = old_offset[2] if len(old_offset) > 2 else 0
+                        cam_data["arm_offset"] = [round(float(mean_offset[0]), 6), round(float(mean_offset[1]), 6), z_val]
+                        with open(cam_json_path, "w") as f:
+                            json.dump(cam_data, f, indent=2)
+                            f.write("\n")
+                        log(f"[cmd] Saved arm_offset to cameras.json: [{cam_data['arm_offset'][0]*100:.2f}, {cam_data['arm_offset'][1]*100:.2f}, {z_val*100:.2f}] cm")
+                        log(f"[cmd] Restart server for this to take effect")
+                    except Exception as e:
+                        log(f"[cmd] Error saving to cameras.json: {e}")
+            elif args_str:
+                # /calib_arm <x_cm> <y_cm> — collect a sample
+                parts = args_str.split()
+                if len(parts) == 2:
+                    try:
+                        board_x = float(parts[0]) / 100.0
+                        board_y = float(parts[1]) / 100.0
+                        # Get current gripper position via FK
+                        angles = get_joint_angles()
+                        if not angles:
+                            log("[cmd] Cannot read joint angles — is the arm connected?")
+                        else:
+                            urdf_pos = forward_kinematics(angles)
+                            arm_phys = urdf_to_physical(urdf_pos)
+                            sample = {"board": [board_x, board_y], "arm": [float(arm_phys[0]), float(arm_phys[1])]}
+                            _calib_arm_samples.append(sample)
+                            _save_calib_arm_samples()
+                            offset_x = board_x - arm_phys[0]
+                            offset_y = board_y - arm_phys[1]
+                            log(f"[cmd] Sample #{len(_calib_arm_samples)}: board=({board_x*100:.1f}, {board_y*100:.1f})cm  arm=({arm_phys[0]*100:.1f}, {arm_phys[1]*100:.1f})cm  offset=({offset_x*100:.1f}, {offset_y*100:.1f})cm")
+                            log(f"[cmd] {len(_calib_arm_samples)} sample(s) collected. Use /calib_arm solve when ready.")
+                    except ValueError:
+                        log("[cmd] Usage: /calib_arm <x_cm> <y_cm>")
+                else:
+                    log("[cmd] Usage: /calib_arm <x_cm> <y_cm>")
+            else:
+                log("[cmd] Arm offset calibration — place gripper tip on a known board position")
+                log("[cmd]   /calib_arm <x_cm> <y_cm>   Collect sample (x=right, y=forward)")
+                log("[cmd]   /calib_arm status           Show collected samples")
+                log("[cmd]   /calib_arm solve            Compute & save arm_offset")
+                log("[cmd]   /calib_arm del <n>          Delete sample #n")
+                log("[cmd]   /calib_arm clear            Clear all samples")
         elif lower.startswith("/calib_ex"):
             import cv2, numpy as np, json, os
             from detect import detect_objects

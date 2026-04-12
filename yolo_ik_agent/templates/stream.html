@@ -187,6 +187,7 @@ var cmdCommands=[
   {cmd:'/gripper close',desc:'Close gripper'},
   {cmd:'/pos ',desc:'Move gripper to object without picking up (e.g. /pos red block)'},
   {cmd:'/autofocus',desc:'Auto-focus all cameras and save focus values'},
+  {cmd:'/calib_arm ',desc:'Arm offset calibration — /calib_arm <x_cm> <y_cm> | solve | status | clear | del'},
   {cmd:'/calib_ex ',desc:'Extrinsic calibration — /calib_ex <right_cm> <fwd_cm> | solve | clear | status | arm'},
 ];
 var cmdSelIdx=-1;
@@ -243,6 +244,7 @@ function toggleHelp(){
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/t on / /t off</td><td style="color:#888;padding:4px">Toggle motor torque on/off</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/pos &lt;object&gt;</td><td style="color:#888;padding:4px">Move gripper to object position (no grip)</td></tr>'+
     '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/autofocus</td><td style="color:#888;padding:4px">Auto-focus all cameras and save values</td></tr>'+
+    '<tr style="border-bottom:1px solid #333"><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calib_arm &lt;x&gt; &lt;y&gt;</td><td style="color:#888;padding:4px">Arm offset calibration (solve | status | clear | del)</td></tr>'+
     '<tr><td style="color:#0f0;padding:4px 8px;white-space:nowrap">/calib_ex &lt;r&gt; &lt;f&gt;</td><td style="color:#888;padding:4px">Extrinsic calibration (solve | clear | status | arm)</td></tr>'+
     '</table>'+
     '<h3 style="color:#0ff;margin:12px 0 8px">Examples (click to fill)</h3>'+

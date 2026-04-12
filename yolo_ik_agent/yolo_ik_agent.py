@@ -221,8 +221,8 @@ def get_joint_angles():
 
 # IK correction: URDF geometry doesn't perfectly match physical arm
 # Applied only to IK targets, not camera calculations
-IK_OFFSET_RIGHT = -0.01   # 1cm left of object
-IK_OFFSET_FWD = 0.0
+IK_OFFSET_RIGHT = -0.02   # 2cm left of object (left jaw is fixed, right jaw opens)
+IK_OFFSET_FWD = 0.02      # 1cm forward of object
 IK_OFFSET_UP = 0.0
 
 def move_to_xyz(target_xyz, current_angles=None):
