@@ -2,9 +2,31 @@
 Camera configuration loader. Reads all camera parameters from cameras.json.
 """
 
+import glob
 import json
 import os
 import numpy as np
+
+_RED = "\033[91m"
+_GREEN = "\033[92m"
+_YELLOW = "\033[93m"
+_CYAN = "\033[96m"
+_RESET = "\033[0m"
+
+
+def find_index_by_name(name):
+    """Find the first /dev/videoX index whose device name contains the given string."""
+    for path in sorted(glob.glob("/sys/class/video4linux/video*/name")):
+        try:
+            with open(path) as f:
+                dev_name = f.read().strip()
+            if name.lower() in dev_name.lower():
+                idx = int(path.split("/video")[2].split("/")[0])
+                print(f"{_GREEN}[cameras]{_RESET} Found '{dev_name}' at index {idx}")
+                return idx
+        except Exception:
+            continue
+    return None
 
 CAMERAS_FILE = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
 
@@ -147,3 +169,55 @@ def reload():
     global _cameras
     _cameras = None
     _load()
+
+
+def open_capture(device_name, cam_name):
+    """Find a camera by device name and open a cv2.VideoCapture with resolution/focus applied.
+
+    Returns (capture, index) on success or (None, None) on failure.
+    `cam_name` is the logical name ('top'/'side') used to look up saved resolution/focus.
+    """
+    import cv2
+    idx = find_index_by_name(device_name) if device_name else None
+    if idx is None:
+        print(f"{_RED}[cameras]{_RESET} No {cam_name} camera found (name '{device_name}')")
+        return None, None
+
+    dev_path = f"/dev/video{idx}"
+    cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        print(f"{_RED}[cameras]{_RESET} Could not open {cam_name} camera ({dev_path})")
+        return None, None
+
+    # FOURCC must be set first, then resolution
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    res_w, res_h = get_resolution(cam_name)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+    if cam_name == "top":
+        cap.set(cv2.CAP_PROP_SHARPNESS, 7)
+
+    focus = get_focus(cam_name)
+    if focus is not None:
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        cap.set(cv2.CAP_PROP_FOCUS, focus)
+        print(f"{_CYAN}[cameras]{_RESET} {cam_name} using saved focus={focus}")
+    elif cam_name == "top":
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+    else:
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        cap.set(cv2.CAP_PROP_FOCUS, 60)
+
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"{_GREEN}[cameras]{_RESET} {cam_name} camera opened ({dev_path}, {actual_w}x{actual_h})")
+    return cap, idx
+
+
+def reopen_by_index(idx):
+    """Reopen a cv2.VideoCapture at the given /dev/video index. Returns capture or None."""
+    import cv2
+    cap = cv2.VideoCapture(idx)
+    if cap.isOpened():
+        return cap
+    return None

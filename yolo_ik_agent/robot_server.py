@@ -47,7 +47,7 @@ CAMERA_SIDE_NAME = os.environ.get("CAM_SIDE_NAME", "Logitech Webcam C930e")
 
 
 import sys as _sys
-_sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import arms as arms_config
 ROBOT_SERIAL = arms_config.follower_serial()
 LEADER_SERIAL = arms_config.leader_serial()
@@ -119,187 +119,25 @@ chat_lock = threading.Lock()
 # Messages submitted from dashboard, waiting for agent to pick up
 chat_pending = []
 
-def find_port_by_serial(serial_number):
-    """Find the serial port whose USB serial number matches. Returns device path or None."""
-    try:
-        import serial.tools.list_ports
-        for port in serial.tools.list_ports.comports():
-            if port.serial_number == serial_number:
-                print(f"{C.GREEN}[robot]{C.RESET} Found serial {serial_number} at {C.CYAN}{port.device}{C.RESET}")
-                return port.device
-    except Exception as e:
-        print(f"{C.RED}[robot]{C.RESET} Serial lookup failed: {e}")
-    return None
-
-def autodetect_serial_port():
-    """Return the first available ttyACM* or ttyUSB* port, or None."""
-    import glob
-    candidates = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
-    if candidates:
-        print(f"{C.CYAN}[robot]{C.RESET} Auto-detected serial ports: {candidates}")
-        return candidates[0]
-    return None
-
-def find_camera_index_by_name(name):
-    """Find the first /dev/videoX index whose device name contains the given string."""
-    import glob
-    for path in sorted(glob.glob("/sys/class/video4linux/video*/name")):
-        try:
-            with open(path) as f:
-                dev_name = f.read().strip()
-            if name.lower() in dev_name.lower():
-                idx = int(path.split("/video")[2].split("/")[0])
-                print(f"{C.GREEN}[camera]{C.RESET} Found '{dev_name}' at index {idx}")
-                return idx
-        except Exception:
-            continue
-    return None
-
-def autodetect_cameras():
-    """Return list of working camera indices (tries 0-9)."""
-    import cv2
-    found = []
-    for idx in range(10):
-        cap = cv2.VideoCapture(idx)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                found.append(idx)
-        cap.release()
-    print(f"{C.CYAN}[camera]{C.RESET} Auto-detected camera indices: {found}")
-    return found
-
-def get_motor_ids():
-    """Extract integer motor IDs from the bus, handling various lerobot formats."""
-    def flatten_ints(val):
-        """Recursively extract all integers from a value."""
-        if isinstance(val, int):
-            return [val]
-        if isinstance(val, (list, tuple)):
-            result = []
-            for x in val:
-                result += flatten_ints(x)
-            return result
-        return []
-
-    if hasattr(robot.bus, 'motor_ids'):
-        ids = flatten_ints(list(robot.bus.motor_ids))
-        if ids:
-            return ids
-    if hasattr(robot.bus, 'motors'):
-        ids = []
-        for v in robot.bus.motors.values():
-            ids += flatten_ints(v)
-        if ids:
-            return ids
-    return list(range(1, 7))  # SO-101 fallback: servos 1-6
-
-
 def init_robot():
     global robot
-    # Priority: serial number lookup → autodetect
-    port = find_port_by_serial(ROBOT_SERIAL)
-    if port is None:
-        print(f"{C.YELLOW}[robot]{C.RESET} Serial {ROBOT_SERIAL} not found, auto-detecting...")
-        port = autodetect_serial_port()
-    if port is None:
-        print(f"{C.RED}[robot]{C.RESET} No serial port found for follower arm")
-        robot = None
-        return
-    try:
-        from lerobot.robots.so_follower.so_follower import SOFollower
-        from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
-        config = SOFollowerRobotConfig(port=port)
-        robot = SOFollower(config)
-        robot.connect(calibrate=False)
-        print(f"{C.GREEN}[robot]{C.RESET} Connected to SO-101 on {C.CYAN}{port}{C.RESET}")
-        # Enable torque so servos respond to position commands
-        try:
-            robot.bus.enable_torque()
-            torque_enabled = True
-            print(f"{C.GREEN}[robot]{C.RESET} Torque enabled")
-        except Exception as te:
-            print(f"{C.RED}[robot]{C.RESET} Torque enable failed: {te} — arm may not move")
-    except Exception as e:
-        print(f"{C.RED}[robot]{C.RESET} Could not connect to arm: {e}")
+    robot = arms_config.connect_follower()
+    if robot is None:
         print(f"{C.YELLOW}[robot]{C.RESET} Running in camera-only mode")
-        robot = None
 
 def init_cameras():
-    import cv2
-
-    # Load saved focus values from cameras.json
-    saved_focus = {}
-    for cam_name in ("top", "side"):
-        focus = cameras_config.get_focus(cam_name)
-        if focus is not None:
-            saved_focus[cam_name] = focus
-
-    # Resolve indices by device name, fall back to auto-detect if not found
-    top_idx = find_camera_index_by_name(CAMERA_TOP_NAME) if CAMERA_TOP_NAME else None
-    side_idx = find_camera_index_by_name(CAMERA_SIDE_NAME) if CAMERA_SIDE_NAME else None
-
-    needs_autodetect = []
-    for name, idx in [("top", top_idx), ("side", side_idx)]:
-        if idx is None:
-            needs_autodetect.append(name)
-            continue
-        cap = cv2.VideoCapture(idx)
-        ok = cap.isOpened()
-        cap.release()
-        if not ok:
-            needs_autodetect.append(name)
-
-    if needs_autodetect:
-        print(f"{C.YELLOW}[camera]{C.RESET} Could not open configured indices for {needs_autodetect}, auto-detecting...")
-        available = autodetect_cameras()
-        if len(available) >= 2:
-            top_idx, side_idx = available[0], available[1]
-            print(f"{C.CYAN}[camera]{C.RESET} Using auto-detected: top={top_idx}, side={side_idx}")
-        elif len(available) == 1:
-            top_idx = available[0]
-            print(f"{C.YELLOW}[camera]{C.RESET} Only one camera found (index {available[0]}), using for top")
-
-    cam_names = {"top": CAMERA_TOP_NAME, "side": CAMERA_SIDE_NAME}
-    for name, idx in [("top", top_idx), ("side", side_idx)]:
-        if idx is None:
-            print(f"{C.RED}[camera]{C.RESET} No {name} camera found")
-            continue
-        # Open by device path with V4L2 backend for reliable high-res capture
-        dev_path = f"/dev/video{idx}"
-        cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
-        if cap.isOpened():
-            # FOURCC must be set first, then resolution
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-            res_w, res_h = cameras_config.get_resolution(name)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
-            if name == "top":
-                cap.set(cv2.CAP_PROP_SHARPNESS, 7)
-            if name in saved_focus:
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-                cap.set(cv2.CAP_PROP_FOCUS, saved_focus[name])
-                print(f"{C.CYAN}[camera]{C.RESET} {name} using saved focus={saved_focus[name]}")
-            elif name == "top":
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
-            else:
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-                cap.set(cv2.CAP_PROP_FOCUS, 60)
-            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    for name, device_name in [("top", CAMERA_TOP_NAME), ("side", CAMERA_SIDE_NAME)]:
+        cap, idx = cameras_config.open_capture(device_name, name)
+        if cap is not None:
             cameras[name] = cap
-            camera_info[name] = {"name": cam_names[name], "index": idx}
-            print(f"{C.GREEN}[camera]{C.RESET} {name} camera opened ({dev_path}, {actual_w}x{actual_h})")
-        else:
-            print(f"{C.RED}[camera]{C.RESET} Could not open {name} camera ({dev_path})")
+            camera_info[name] = {"name": device_name, "index": idx}
 
 def reopen_camera(name):
     """Try to reopen a camera by name. Returns True on success."""
-    import cv2
     idx = camera_info.get(name, {}).get("index")
     if idx is None:
         cam_name = CAMERA_TOP_NAME if name == "top" else CAMERA_SIDE_NAME
-        idx = find_camera_index_by_name(cam_name) if cam_name else None
+        idx = cameras_config.find_index_by_name(cam_name) if cam_name else None
     if idx is None:
         print(f"{C.RED}[camera]{C.RESET} {name} reopen failed — no known index")
         return False
@@ -310,8 +148,8 @@ def reopen_camera(name):
             old.release()
         except Exception:
             pass
-    cap = cv2.VideoCapture(idx)
-    if cap.isOpened():
+    cap = cameras_config.reopen_by_index(idx)
+    if cap is not None:
         cameras[name] = cap
         print(f"{C.GREEN}[camera]{C.RESET} {name} reopened successfully")
         return True
@@ -357,15 +195,7 @@ def get_joint_positions():
     except Exception as e:
         return {"error": str(e)}
 
-# ---- Named Poses ----
-PRESETS = {
-    "home":    {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
-    "ready":   {"shoulder_pan": 0, "shoulder_lift": 40, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": -90, "gripper": 0},
-    "default": {"shoulder_pan": 0, "shoulder_lift": 0, "elbow_flex": 0, "wrist_flex": 0, "wrist_roll": 0, "gripper": 0},
-    "rest":    {"shoulder_pan": -1.10, "shoulder_lift": -102.24, "elbow_flex": 96.57, "wrist_flex": 76.35, "wrist_roll": -86.02, "gripper": 1.20},
-    "drop":    {"shoulder_pan": -47.08, "shoulder_lift": 10.46, "elbow_flex": -12.44, "wrist_flex": 86.20, "wrist_roll": -94.64, "gripper": 0},
-    "side_view": {"shoulder_pan": -5.5, "shoulder_lift": 24.1, "elbow_flex": 65.6, "wrist_flex": -71.6, "wrist_roll": -86.3, "gripper": 100},
-}
+PRESETS = arms_config.PRESETS
 
 # ---- Routes ----
 
@@ -1349,37 +1179,11 @@ def confirm_grip():
 
 # ---- Teleop ----
 
-def find_leader_port():
-    """Find the leader arm port by USB serial number, falling back to any non-follower ttyACM/ttyUSB."""
-    port = find_port_by_serial(LEADER_SERIAL)
-    if port:
-        return port
-    try:
-        import serial.tools.list_ports
-        follower_port = robot.bus.port if robot and hasattr(robot, 'bus') else None
-        for p in serial.tools.list_ports.comports():
-            if p.device != follower_port and ("ttyACM" in p.device or "ttyUSB" in p.device):
-                print(f"{C.GREEN}[teleop]{C.RESET} Auto-detected leader at {C.CYAN}{p.device}{C.RESET} (serial: {p.serial_number})")
-                return p.device
-    except Exception as e:
-        print(f"{C.RED}[teleop]{C.RESET} Auto-detect failed: {e}")
-    return None
-
-def init_leader(port):
-    """Initialize the leader arm on the given port."""
+def init_leader():
+    """Connect leader arm by USB serial. Returns True on success."""
     global leader
-    try:
-        from lerobot.teleoperators.so_leader.so_leader import SOLeader
-        from lerobot.teleoperators.so_leader.config_so_leader import SOLeaderTeleopConfig
-        config = SOLeaderTeleopConfig(port=port)
-        leader = SOLeader(config)
-        leader.connect()
-        print(f"{C.GREEN}[teleop]{C.RESET} Leader arm connected on {C.CYAN}{port}{C.RESET}")
-        return True
-    except Exception as e:
-        print(f"{C.RED}[teleop]{C.RESET} Failed to connect leader arm: {e}")
-        leader = None
-        return False
+    leader, _ = arms_config.connect_leader()
+    return leader is not None
 
 def teleop_loop():
     """Background thread: read leader positions and send to follower at TELEOP_FPS."""
@@ -1407,7 +1211,7 @@ def teleop_loop():
     teleop_active = False
     print(f"{C.YELLOW}[teleop]{C.RESET} Loop stopped")
 
-def start_teleop(port=None):
+def start_teleop():
     """Start teleoperation. Returns (ok, message)."""
     global teleop_active, teleop_thread, torque_enabled
     if teleop_active:
@@ -1417,11 +1221,8 @@ def start_teleop(port=None):
 
     # Find and connect leader if needed
     if leader is None:
-        leader_port = port or find_leader_port()
-        if not leader_port:
+        if not init_leader():
             return False, f"No leader arm found (serial {LEADER_SERIAL} not present)."
-        if not init_leader(leader_port):
-            return False, f"Failed to connect leader on {leader_port}"
 
     # Enable torque on follower
     try:
@@ -1457,7 +1258,7 @@ def teleop():
     data = request.json or {}
     action = data.get("action", "status")
     if action == "start":
-        ok, msg = start_teleop(port=data.get("port"))
+        ok, msg = start_teleop()
         return jsonify({"ok": ok, "message": msg, "teleop_active": teleop_active})
     elif action == "stop":
         ok, msg = stop_teleop()
