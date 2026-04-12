@@ -82,6 +82,54 @@ def get_scaled_intrinsics(name, frame_width, frame_height):
     return matrix, dist
 
 
+def get_resolution(name, default=(640, 480)):
+    """Return (width, height) for a camera, or default if missing."""
+    try:
+        cam = get_camera(name)
+    except (ValueError, FileNotFoundError):
+        return default
+    res = cam.get("resolution")
+    return tuple(res) if res else default
+
+
+def get_focus(name):
+    """Return saved focus value for a camera, or None if unset."""
+    try:
+        cam = get_camera(name)
+    except (ValueError, FileNotFoundError):
+        return None
+    return cam.get("focus")
+
+
+def get_arm_offset():
+    """Return arm_offset list [x, y, z] (padded to length 3, zeros if missing)."""
+    try:
+        cams = _load()
+    except FileNotFoundError:
+        return [0.0, 0.0, 0.0]
+    offset = list(cams.get("arm_offset", [0.0, 0.0, 0.0]))
+    while len(offset) < 3:
+        offset.append(0.0)
+    return offset
+
+
+def set_focus(name, focus_value):
+    """Persist a camera's focus value to cameras.json."""
+    update_camera(name, focus=focus_value)
+
+
+def set_arm_offset(xy_or_xyz):
+    """Persist arm_offset to cameras.json. Accepts [x,y] or [x,y,z]."""
+    cams = _load()
+    vals = [float(v) for v in xy_or_xyz]
+    while len(vals) < 3:
+        vals.append(0.0)
+    cams["arm_offset"] = vals
+    with open(CAMERAS_FILE, 'w') as f:
+        json.dump(cams, f, indent=2)
+        f.write("\n")
+
+
 def update_camera(name, **kwargs):
     """Update camera parameters and save to cameras.json.
     Example: update_camera('side', position=[-0.30, 0.32, 0.14], pitch=-14)"""

@@ -14,7 +14,6 @@ Endpoints:
     POST /enable              - enable/disable torque {"enabled": true/false}
 """
 
-import argparse
 import base64
 import json
 import os
@@ -22,6 +21,8 @@ import threading
 import time
 from io import BytesIO
 from flask import Flask, jsonify, request, Response, stream_with_context, render_template
+
+import cameras as cameras_config
 
 # ---- Terminal Colors ----
 class C:
@@ -40,37 +41,17 @@ JPEG_QUALITY = 90
 CROSSHAIR_OFFSET_Y = 53  # pixels down from center (tune until dot matches gripper close point)
 CROSSHAIR_OFFSET_X = 30   # pixels right from center
 
-# Camera device indices — override with CAM_TOP / CAM_SIDE env vars
-# Or use CAM_TOP_NAME / CAM_SIDE_NAME to find cameras by device name
-CAMERA_TOP_IDX = int(os.environ.get("CAM_TOP", "4"))
-CAMERA_SIDE_IDX = int(os.environ.get("CAM_SIDE", "0"))
+# Cameras resolved by device name — override with CAM_TOP_NAME / CAM_SIDE_NAME
 CAMERA_TOP_NAME = os.environ.get("CAM_TOP_NAME", "HD Pro Webcam C920")
 CAMERA_SIDE_NAME = os.environ.get("CAM_SIDE_NAME", "Logitech Webcam C930e")
 
-# Camera resolutions loaded from cameras.json (single source of truth)
-camera_resolutions = {}
-try:
-    import json as _json
-    _cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
-    with open(_cam_json_path) as _f:
-        _cam_data = _json.load(_f)
-    for _name in ("top", "side"):
-        if _name in _cam_data and "resolution" in _cam_data[_name]:
-            camera_resolutions[_name] = tuple(_cam_data[_name]["resolution"])
-except Exception:
-    pass
-# Fallback defaults if cameras.json is missing
-camera_resolutions.setdefault("top", (640, 480))
-camera_resolutions.setdefault("side", (640, 480))
 
-# SO-101 port — looked up by USB serial number at startup
-# Override with ROBOT_PORT env var or --port CLI argument if needed
-ROBOT_SERIAL = "5AE6083982"
-ROBOT_PORT = os.environ.get("ROBOT_PORT", "/dev/ttyACM0")
-
-# Leader arm for teleop — override with LEADER_PORT env var or --leader-port CLI arg
-LEADER_PORT = os.environ.get("LEADER_PORT", "")
-TELEOP_FPS = 60
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import arms as arms_config
+ROBOT_SERIAL = arms_config.follower_serial()
+LEADER_SERIAL = arms_config.leader_serial()
+TELEOP_FPS = arms_config.teleop_fps()
 
 app = Flask(__name__)
 
@@ -216,14 +197,15 @@ def get_motor_ids():
 
 def init_robot():
     global robot
-    # Priority: serial number lookup → configured port → autodetect
+    # Priority: serial number lookup → autodetect
     port = find_port_by_serial(ROBOT_SERIAL)
     if port is None:
-        print(f"{C.YELLOW}[robot]{C.RESET} Serial {ROBOT_SERIAL} not found, falling back to {ROBOT_PORT}")
-        port = ROBOT_PORT
-    if not os.path.exists(port):
-        print(f"{C.YELLOW}[robot]{C.RESET} {port} not found, auto-detecting...")
-        port = autodetect_serial_port() or ROBOT_PORT
+        print(f"{C.YELLOW}[robot]{C.RESET} Serial {ROBOT_SERIAL} not found, auto-detecting...")
+        port = autodetect_serial_port()
+    if port is None:
+        print(f"{C.RED}[robot]{C.RESET} No serial port found for follower arm")
+        robot = None
+        return
     try:
         from lerobot.robots.so_follower.so_follower import SOFollower
         from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
@@ -244,34 +226,24 @@ def init_robot():
         robot = None
 
 def init_cameras():
-    import cv2, json
+    import cv2
 
     # Load saved focus values from cameras.json
     saved_focus = {}
-    try:
-        cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
-        with open(cam_json_path, "r") as f:
-            cam_data = json.load(f)
-        for cam_name in ("top", "side"):
-            if cam_name in cam_data and "focus" in cam_data[cam_name]:
-                saved_focus[cam_name] = cam_data[cam_name]["focus"]
-    except Exception:
-        pass
+    for cam_name in ("top", "side"):
+        focus = cameras_config.get_focus(cam_name)
+        if focus is not None:
+            saved_focus[cam_name] = focus
 
-    # Resolve indices by name first, fall back to configured index, then auto-detect
+    # Resolve indices by device name, fall back to auto-detect if not found
     top_idx = find_camera_index_by_name(CAMERA_TOP_NAME) if CAMERA_TOP_NAME else None
-    if top_idx is None:
-        top_idx = CAMERA_TOP_IDX
-        print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for top, using index {top_idx}")
-
     side_idx = find_camera_index_by_name(CAMERA_SIDE_NAME) if CAMERA_SIDE_NAME else None
-    if side_idx is None:
-        side_idx = CAMERA_SIDE_IDX
-        print(f"{C.YELLOW}[camera]{C.RESET} Name lookup failed for side, using index {side_idx}")
 
-    # Auto-detect if resolved indices still don't open
     needs_autodetect = []
     for name, idx in [("top", top_idx), ("side", side_idx)]:
+        if idx is None:
+            needs_autodetect.append(name)
+            continue
         cap = cv2.VideoCapture(idx)
         ok = cap.isOpened()
         cap.release()
@@ -290,13 +262,16 @@ def init_cameras():
 
     cam_names = {"top": CAMERA_TOP_NAME, "side": CAMERA_SIDE_NAME}
     for name, idx in [("top", top_idx), ("side", side_idx)]:
+        if idx is None:
+            print(f"{C.RED}[camera]{C.RESET} No {name} camera found")
+            continue
         # Open by device path with V4L2 backend for reliable high-res capture
         dev_path = f"/dev/video{idx}"
         cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
         if cap.isOpened():
             # FOURCC must be set first, then resolution
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-            res_w, res_h = camera_resolutions.get(name, (640, 480))
+            res_w, res_h = cameras_config.get_resolution(name)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
             if name == "top":
@@ -323,7 +298,11 @@ def reopen_camera(name):
     import cv2
     idx = camera_info.get(name, {}).get("index")
     if idx is None:
-        idx = CAMERA_SIDE_IDX if name == "side" else CAMERA_TOP_IDX
+        cam_name = CAMERA_TOP_NAME if name == "top" else CAMERA_SIDE_NAME
+        idx = find_camera_index_by_name(cam_name) if cam_name else None
+    if idx is None:
+        print(f"{C.RED}[camera]{C.RESET} {name} reopen failed — no known index")
+        return False
     print(f"{C.YELLOW}[camera]{C.RESET} {name} reopening index {idx}...")
     old = cameras.get(name)
     if old:
@@ -359,7 +338,7 @@ def capture_snapshot(name):
                 ret, frame = cam.read() if cam else (False, None)
             if not ret:
                 return None, f"Failed to read from {name} camera"
-    w, h = camera_resolutions.get(name, (640, 480))
+    w, h = cameras_config.get_resolution(name)
     frame = cv2.resize(frame, (w, h))
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
     _, buf = cv2.imencode(".jpg", frame, encode_params)
@@ -457,7 +436,7 @@ def mjpeg_generator(name):
             overlay_bytes = base64.b64decode(overlay_b64)
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + overlay_bytes + b"\r\n")
         else:
-            sw, sh = camera_resolutions.get(name, (640, 480))
+            sw, sh = cameras_config.get_resolution(name)
             frame = cv2.resize(frame, (sw, sh))
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
@@ -583,8 +562,8 @@ def snapshot(name):
     return jsonify({
         "camera": name,
         "format": "jpeg",
-        "width": camera_resolutions.get(name, (640, 480))[0],
-        "height": camera_resolutions.get(name, (640, 480))[1],
+        "width": cameras_config.get_resolution(name)[0],
+        "height": cameras_config.get_resolution(name)[1],
         "data": b64,
         "timestamp": time.time()
     })
@@ -961,7 +940,6 @@ def _run_command_thread(command):
         elif lower.startswith("/autofocus"):
             import cv2, numpy as np
             import time as _time
-            import json, os
 
             # Sweep focus 0-255 in steps, measure sharpness, pick the best
             step = 5
@@ -1009,22 +987,15 @@ def _run_command_thread(command):
                 log(f"[cmd] {cam_name}: best focus={best_focus} (sharpness={best_sharpness:.0f})")
 
             # Save to cameras.json
-            cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
             try:
-                with open(cam_json_path, "r") as f:
-                    cam_data = json.load(f)
                 for cam_name, focus_val in focus_results.items():
-                    if cam_name in cam_data:
-                        cam_data[cam_name]["focus"] = focus_val
-                with open(cam_json_path, "w") as f:
-                    json.dump(cam_data, f, indent=2)
-                    f.write("\n")
+                    cameras_config.set_focus(cam_name, focus_val)
                 log(f"[cmd] Saved focus values to cameras.json")
             except Exception as e:
                 log(f"[cmd] Warning: could not save to cameras.json: {e}")
             log("[cmd] Autofocus complete")
         elif lower.startswith("/calib_arm"):
-            import numpy as np, json, os
+            import numpy as np
 
             args_str = command.split(None, 1)[1].strip() if " " in command else ""
             args_lower = args_str.lower()
@@ -1068,17 +1039,11 @@ def _run_command_thread(command):
                         std = offsets.std(axis=0)
                         log(f"[cmd]   Std dev: X={std[0]*100:.2f}cm  Y={std[1]*100:.2f}cm")
                     # Save to cameras.json, preserving arm_offset[2]
-                    cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
                     try:
-                        with open(cam_json_path, "r") as f:
-                            cam_data = json.load(f)
-                        old_offset = cam_data.get("arm_offset", [0, 0, 0])
-                        z_val = old_offset[2] if len(old_offset) > 2 else 0
-                        cam_data["arm_offset"] = [round(float(mean_offset[0]), 6), round(float(mean_offset[1]), 6), z_val]
-                        with open(cam_json_path, "w") as f:
-                            json.dump(cam_data, f, indent=2)
-                            f.write("\n")
-                        log(f"[cmd] Saved arm_offset to cameras.json: [{cam_data['arm_offset'][0]*100:.2f}, {cam_data['arm_offset'][1]*100:.2f}, {z_val*100:.2f}] cm")
+                        z_val = cameras_config.get_arm_offset()[2]
+                        new_offset = [round(float(mean_offset[0]), 6), round(float(mean_offset[1]), 6), z_val]
+                        cameras_config.set_arm_offset(new_offset)
+                        log(f"[cmd] Saved arm_offset to cameras.json: [{new_offset[0]*100:.2f}, {new_offset[1]*100:.2f}, {z_val*100:.2f}] cm")
                         log(f"[cmd] Restart server for this to take effect")
                     except Exception as e:
                         log(f"[cmd] Error saving to cameras.json: {e}")
@@ -1115,7 +1080,7 @@ def _run_command_thread(command):
                 log("[cmd]   /calib_arm del <n>          Delete sample #n")
                 log("[cmd]   /calib_arm clear            Clear all samples")
         elif lower.startswith("/calib_ex"):
-            import cv2, numpy as np, json, os
+            import cv2, numpy as np
             from detect import detect_objects
             from cameras import get_intrinsics, get_scaled_intrinsics, update_camera, reload as reload_cameras
             from yolo_ik_agent import get_surface_z
@@ -1129,14 +1094,7 @@ def _run_command_thread(command):
                     try:
                         arm_r = float(arm_parts[1]) / 100.0
                         arm_f = float(arm_parts[2]) / 100.0
-                        # Save to cameras.json
-                        cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
-                        with open(cam_json_path, "r") as f:
-                            cam_data = json.load(f)
-                        cam_data["arm_offset"] = [arm_r, arm_f]
-                        with open(cam_json_path, "w") as f:
-                            json.dump(cam_data, f, indent=2)
-                            f.write("\n")
+                        cameras_config.set_arm_offset([arm_r, arm_f])
                         log(f"[cmd] Arm offset set: right={arm_r*100:.1f}cm fwd={arm_f*100:.1f}cm")
                         log(f"[cmd] Detection results will be converted: arm_pos = board_pos - ({arm_r*100:.1f}, {arm_f*100:.1f})")
                         log(f"[cmd] Restart server for this to take effect")
@@ -1144,11 +1102,8 @@ def _run_command_thread(command):
                         log("[cmd] Usage: /calib_ex arm <right_cm> <fwd_cm>")
                 else:
                     # Show current offset
-                    cam_json_path = os.path.join(os.path.dirname(__file__), "calibration_data", "cameras.json")
                     try:
-                        with open(cam_json_path) as f:
-                            cam_data = json.load(f)
-                        offset = cam_data.get("arm_offset", [0, 0])
+                        offset = cameras_config.get_arm_offset()
                         log(f"[cmd] Current arm offset: right={offset[0]*100:.1f}cm fwd={offset[1]*100:.1f}cm")
                     except Exception:
                         log("[cmd] No arm offset configured")
@@ -1395,17 +1350,17 @@ def confirm_grip():
 # ---- Teleop ----
 
 def find_leader_port():
-    """Find the leader arm port. Uses LEADER_PORT env, or finds a second ttyACM/ttyUSB device."""
-    if LEADER_PORT:
-        return LEADER_PORT
-    # Auto-detect: find serial ports that aren't the follower
+    """Find the leader arm port by USB serial number, falling back to any non-follower ttyACM/ttyUSB."""
+    port = find_port_by_serial(LEADER_SERIAL)
+    if port:
+        return port
     try:
         import serial.tools.list_ports
-        follower_port = robot.bus.port if robot and hasattr(robot, 'bus') else ROBOT_PORT
-        for port in serial.tools.list_ports.comports():
-            if port.device != follower_port and ("ttyACM" in port.device or "ttyUSB" in port.device):
-                print(f"{C.GREEN}[teleop]{C.RESET} Auto-detected leader at {C.CYAN}{port.device}{C.RESET} (serial: {port.serial_number})")
-                return port.device
+        follower_port = robot.bus.port if robot and hasattr(robot, 'bus') else None
+        for p in serial.tools.list_ports.comports():
+            if p.device != follower_port and ("ttyACM" in p.device or "ttyUSB" in p.device):
+                print(f"{C.GREEN}[teleop]{C.RESET} Auto-detected leader at {C.CYAN}{p.device}{C.RESET} (serial: {p.serial_number})")
+                return p.device
     except Exception as e:
         print(f"{C.RED}[teleop]{C.RESET} Auto-detect failed: {e}")
     return None
@@ -1464,7 +1419,7 @@ def start_teleop(port=None):
     if leader is None:
         leader_port = port or find_leader_port()
         if not leader_port:
-            return False, "No leader arm found. Set LEADER_PORT env or pass port parameter."
+            return False, f"No leader arm found (serial {LEADER_SERIAL} not present)."
         if not init_leader(leader_port):
             return False, f"Failed to connect leader on {leader_port}"
 
@@ -1720,17 +1675,8 @@ def run_diagnostics():
 
 # ---- Main ----
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default=None, help="Serial port for follower arm")
-    parser.add_argument("--leader-port", default=None, help="Serial port for leader arm (teleop)")
-    args = parser.parse_args()
-    if args.port:
-        ROBOT_PORT = args.port
-    if args.leader_port:
-        LEADER_PORT = args.leader_port
-
     print(f"\n{C.BLUE}[boot]{C.RESET} Starting SO-101 Robot Agent Server...")
-    print(f"{C.DIM}[boot] Robot port: {ROBOT_PORT}{C.RESET}")
+    print(f"{C.DIM}[boot] Follower serial: {ROBOT_SERIAL}, leader serial: {LEADER_SERIAL}{C.RESET}")
     init_robot()
     init_cameras()
     # Start background history recorder

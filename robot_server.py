@@ -14,7 +14,6 @@ Endpoints:
     POST /enable              - enable/disable torque {"enabled": true/false}
 """
 
-import argparse
 import base64
 import json
 import os
@@ -51,15 +50,10 @@ CAMERA_WRIST_IDX = int(os.environ.get("CAM_WRIST", "0"))
 CAMERA_TOP_NAME = os.environ.get("CAM_TOP_NAME", "Logitech Webcam C930e")
 CAMERA_WRIST_NAME = os.environ.get("CAM_WRIST_NAME", "USB2.0_CAM1")
 
-# SO-101 port — looked up by USB serial number at startup
-# Override with ROBOT_PORT env var or --port CLI argument if needed
-ROBOT_SERIAL = "5AE6083982"
-ROBOT_PORT = os.environ.get("ROBOT_PORT", "/dev/ttyACM0")
-
-# Leader arm for teleop — looked up by USB serial number, or override with LEADER_PORT env var / --leader-port CLI arg
-LEADER_SERIAL = "5AE6084010"
-LEADER_PORT = os.environ.get("LEADER_PORT", "")
-TELEOP_FPS = 60
+import arms as arms_config
+ROBOT_SERIAL = arms_config.follower_serial()
+LEADER_SERIAL = arms_config.leader_serial()
+TELEOP_FPS = arms_config.teleop_fps()
 
 app = Flask(__name__)
 
@@ -201,14 +195,15 @@ def get_motor_ids():
 
 def init_robot():
     global robot
-    # Priority: serial number lookup → configured port → autodetect
+    # Priority: serial number lookup → autodetect
     port = find_port_by_serial(ROBOT_SERIAL)
     if port is None:
-        print(f"{C.YELLOW}[robot]{C.RESET} Serial {ROBOT_SERIAL} not found, falling back to {ROBOT_PORT}")
-        port = ROBOT_PORT
-    if not os.path.exists(port):
-        print(f"{C.YELLOW}[robot]{C.RESET} {port} not found, auto-detecting...")
-        port = autodetect_serial_port() or ROBOT_PORT
+        print(f"{C.YELLOW}[robot]{C.RESET} Serial {ROBOT_SERIAL} not found, auto-detecting...")
+        port = autodetect_serial_port()
+    if port is None:
+        print(f"{C.RED}[robot]{C.RESET} No serial port found for follower arm")
+        robot = None
+        return
     try:
         from lerobot.robots.so_follower.so_follower import SOFollower
         from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
@@ -1164,22 +1159,18 @@ def confirm_grip():
 # ---- Teleop ----
 
 def find_leader_port():
-    """Find the leader arm port. Uses LEADER_PORT env, serial number lookup, or finds a second ttyACM/ttyUSB device."""
-    if LEADER_PORT:
-        return LEADER_PORT
-    # Priority 1: serial number lookup
+    """Find the leader arm port by USB serial number, falling back to any non-follower ttyACM/ttyUSB."""
     port = find_port_by_serial(LEADER_SERIAL)
     if port:
         print(f"{C.GREEN}[teleop]{C.RESET} Found leader by serial {LEADER_SERIAL} at {C.CYAN}{port}{C.RESET}")
         return port
-    # Priority 2: auto-detect — find serial ports that aren't the follower
     try:
         import serial.tools.list_ports
-        follower_port = robot.bus.port if robot and hasattr(robot, 'bus') else ROBOT_PORT
-        for port in serial.tools.list_ports.comports():
-            if port.device != follower_port and ("ttyACM" in port.device or "ttyUSB" in port.device):
-                print(f"{C.GREEN}[teleop]{C.RESET} Auto-detected leader at {C.CYAN}{port.device}{C.RESET} (serial: {port.serial_number})")
-                return port.device
+        follower_port = robot.bus.port if robot and hasattr(robot, 'bus') else None
+        for p in serial.tools.list_ports.comports():
+            if p.device != follower_port and ("ttyACM" in p.device or "ttyUSB" in p.device):
+                print(f"{C.GREEN}[teleop]{C.RESET} Auto-detected leader at {C.CYAN}{p.device}{C.RESET} (serial: {p.serial_number})")
+                return p.device
     except Exception as e:
         print(f"{C.RED}[teleop]{C.RESET} Auto-detect failed: {e}")
     return None
@@ -1238,7 +1229,7 @@ def start_teleop(port=None):
     if leader is None:
         leader_port = port or find_leader_port()
         if not leader_port:
-            return False, "No leader arm found. Set LEADER_PORT env or pass port parameter."
+            return False, f"No leader arm found (serial {LEADER_SERIAL} not present)."
         if not init_leader(leader_port):
             return False, f"Failed to connect leader on {leader_port}"
 
@@ -1494,17 +1485,8 @@ def run_diagnostics():
 
 # ---- Main ----
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default=None, help="Serial port for follower arm")
-    parser.add_argument("--leader-port", default=None, help="Serial port for leader arm (teleop)")
-    args = parser.parse_args()
-    if args.port:
-        ROBOT_PORT = args.port
-    if args.leader_port:
-        LEADER_PORT = args.leader_port
-
     print(f"\n{C.BLUE}[boot]{C.RESET} Starting SO-101 Robot Agent Server...")
-    print(f"{C.DIM}[boot] Robot port: {ROBOT_PORT}{C.RESET}")
+    print(f"{C.DIM}[boot] Follower serial: {ROBOT_SERIAL}, leader serial: {LEADER_SERIAL}{C.RESET}")
     init_robot()
     init_cameras()
     # Start background history recorder
