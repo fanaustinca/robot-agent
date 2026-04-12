@@ -56,14 +56,11 @@ app = Flask(__name__)
 
 # ---- Robot + Camera State ----
 robot = None
-leader = None
 cameras = {}
 camera_info = {}  # {"top": {"name": ..., "index": ...}, "wrist": {...}}
 camera_locks = {"top": threading.Lock(), "wrist": threading.Lock()}
 robot_lock = threading.Lock()
 torque_enabled = False
-teleop_active = False
-teleop_thread = None
 
 # ---- Joint Position History (rolling 10 min buffer) ----
 HISTORY_INTERVAL = 0.1   # seconds between samples (10hz)
@@ -228,6 +225,7 @@ PRESETS = arms_config.PRESETS
 @app.route("/status")
 def status():
     joints = get_joint_positions()
+    leader = arms_config.get_leader()
     # Leader arm joints (if connected)
     leader_joints = None
     if leader is not None:
@@ -256,7 +254,7 @@ def status():
         "joints": joints,
         "leader_joints": leader_joints,
         "torque_enabled": torque_enabled,
-        "teleop_active": teleop_active,
+        "teleop_active": arms_config.is_teleop_active(),
         "teleop_fps": TELEOP_FPS,
         "floor_drop": floor_drop,
         "history_enabled": history_enabled,
@@ -1043,92 +1041,21 @@ def confirm_grip():
 
 # ---- Teleop ----
 
-def init_leader():
-    """Connect leader arm by USB serial. Returns True on success."""
-    global leader
-    leader, _ = arms_config.connect_leader()
-    return leader is not None
-
-def teleop_loop():
-    """Background thread: read leader positions and send to follower at TELEOP_FPS."""
-    global teleop_active
-    interval = 1.0 / TELEOP_FPS
-    fail_count = 0
-    max_fails = 20  # only stop after 20 consecutive failures (~1 second)
-    print(f"{C.GREEN}[teleop]{C.RESET} Loop started at {TELEOP_FPS} fps")
-    while teleop_active:
-        try:
-            action = leader.get_action()
-            with robot_lock:
-                robot.send_action(action)
-            fail_count = 0
-        except Exception as e:
-            fail_count += 1
-            if fail_count >= max_fails:
-                print(f"{C.RED}[teleop]{C.RESET} {max_fails} consecutive errors, stopping: {e}")
-                break
-            elif fail_count == 1:
-                print(f"{C.YELLOW}[teleop]{C.RESET} Transient error (retrying): {e}")
-            time.sleep(0.05)
-            continue
-        time.sleep(interval)
-    teleop_active = False
-    print(f"{C.YELLOW}[teleop]{C.RESET} Loop stopped")
-
-def start_teleop():
-    """Start teleoperation. Returns (ok, message)."""
-    global teleop_active, teleop_thread, torque_enabled
-    if teleop_active:
-        return False, "Teleop already running"
-    if robot is None:
-        return False, "Follower arm not connected"
-
-    # Find and connect leader if needed
-    if leader is None:
-        if not init_leader():
-            return False, f"No leader arm found (serial {LEADER_SERIAL} not present)."
-
-    # Enable torque on follower
-    try:
-        robot.bus.enable_torque()
-        torque_enabled = True
-    except Exception as e:
-        return False, f"Failed to enable torque: {e}"
-
-    teleop_active = True
-    teleop_thread = threading.Thread(target=teleop_loop, daemon=True)
-    teleop_thread.start()
-    return True, "Teleop started"
-
-def stop_teleop():
-    """Stop teleoperation."""
-    global teleop_active, leader
-    if not teleop_active:
-        return False, "Teleop not running"
-    teleop_active = False
-    if teleop_thread:
-        teleop_thread.join(timeout=2)
-    # Disconnect leader to free the port
-    if leader is not None:
-        try:
-            leader.disconnect()
-        except Exception:
-            pass
-        leader = None
-    return True, "Teleop stopped"
-
 @app.route("/teleop", methods=["POST"])
 def teleop():
+    global torque_enabled
     data = request.json or {}
     action = data.get("action", "status")
     if action == "start":
-        ok, msg = start_teleop()
-        return jsonify({"ok": ok, "message": msg, "teleop_active": teleop_active})
+        ok, msg = arms_config.start_teleop(robot, robot_lock)
+        if ok:
+            torque_enabled = True
+        return jsonify({"ok": ok, "message": msg, "teleop_active": arms_config.is_teleop_active()})
     elif action == "stop":
-        ok, msg = stop_teleop()
-        return jsonify({"ok": ok, "message": msg, "teleop_active": teleop_active})
+        ok, msg = arms_config.stop_teleop()
+        return jsonify({"ok": ok, "message": msg, "teleop_active": arms_config.is_teleop_active()})
     else:
-        return jsonify({"teleop_active": teleop_active})
+        return jsonify({"teleop_active": arms_config.is_teleop_active()})
 
 # ---- Calibration ----
 

@@ -10,6 +10,8 @@ Provides:
 
 import json
 import os
+import threading
+import time
 
 ARMS_FILE = os.path.join(os.path.dirname(__file__), "arms.json")
 
@@ -122,3 +124,90 @@ def connect_leader():
     except Exception as e:
         print(f"{_RED}[arms]{_RESET} Failed to connect leader arm: {e}")
         return None, None
+
+
+# ---- Teleop (leader → follower mirroring) ----
+
+_teleop = {
+    "leader": None,
+    "active": False,
+    "thread": None,
+}
+
+
+def get_leader():
+    return _teleop["leader"]
+
+
+def is_teleop_active():
+    return _teleop["active"]
+
+
+def _teleop_loop(follower, follower_lock):
+    interval = 1.0 / teleop_fps()
+    fail_count = 0
+    max_fails = 20  # ~1 second of consecutive failures before aborting
+    print(f"{_GREEN}[teleop]{_RESET} Loop started at {teleop_fps()} fps")
+    leader = _teleop["leader"]
+    while _teleop["active"]:
+        try:
+            action = leader.get_action()
+            with follower_lock:
+                follower.send_action(action)
+            fail_count = 0
+        except Exception as e:
+            fail_count += 1
+            if fail_count >= max_fails:
+                print(f"{_RED}[teleop]{_RESET} {max_fails} consecutive errors, stopping: {e}")
+                break
+            elif fail_count == 1:
+                print(f"{_YELLOW}[teleop]{_RESET} Transient error (retrying): {e}")
+            time.sleep(0.05)
+            continue
+        time.sleep(interval)
+    _teleop["active"] = False
+    print(f"{_YELLOW}[teleop]{_RESET} Loop stopped")
+
+
+def start_teleop(follower, follower_lock):
+    """Connect leader, enable follower torque, and spawn the mirror thread.
+    Returns (ok, message)."""
+    if _teleop["active"]:
+        return False, "Teleop already running"
+    if follower is None:
+        return False, "Follower arm not connected"
+
+    if _teleop["leader"] is None:
+        leader, _ = connect_leader()
+        if leader is None:
+            return False, f"No leader arm found (serial {leader_serial()} not present)."
+        _teleop["leader"] = leader
+
+    try:
+        follower.bus.enable_torque()
+    except Exception as e:
+        return False, f"Failed to enable torque: {e}"
+
+    _teleop["active"] = True
+    _teleop["thread"] = threading.Thread(
+        target=_teleop_loop, args=(follower, follower_lock), daemon=True
+    )
+    _teleop["thread"].start()
+    return True, "Teleop started"
+
+
+def stop_teleop():
+    """Stop the mirror thread and disconnect the leader."""
+    if not _teleop["active"]:
+        return False, "Teleop not running"
+    _teleop["active"] = False
+    if _teleop["thread"]:
+        _teleop["thread"].join(timeout=2)
+        _teleop["thread"] = None
+    if _teleop["leader"] is not None:
+        try:
+            _teleop["leader"].disconnect()
+        except Exception:
+            pass
+        _teleop["leader"] = None
+    return True, "Teleop stopped"
