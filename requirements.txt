@@ -1,5 +1,7 @@
 flask
 opencv-python
+numpy
+pillow
 lerobot
 
 # Claude agent
@@ -7,3 +9,9 @@ anthropic
 
 # Gemini agent
 google-genai>=1.51.0
+
+# YOLO+IK agent
+torch
+torchvision
+transformers
+ikpy
