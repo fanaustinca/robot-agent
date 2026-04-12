@@ -80,6 +80,51 @@ def board_to_arm_full(pos):
     return pos - _arm_offset
 
 
+def handle_fk_command(log):
+    """Dashboard `/fk` — report gripper pose from current joint angles."""
+    angles = get_joint_angles()
+    if not angles:
+        return
+    urdf_pos = forward_kinematics(angles)
+    phys = urdf_to_physical(urdf_pos)
+    log(
+        f"[cmd] Gripper at: right={phys[0] * 100:.1f}cm fwd={phys[1] * 100:.1f}cm up={phys[2] * 100:.1f}cm"
+    )
+    grip_val = ""
+    try:
+        status = get_status()
+        for k, v in status.get("joints", {}).items():
+            if "gripper" in k:
+                grip_val = f" gripper={float(v):.1f}"
+                break
+    except Exception:
+        pass
+    log(
+        f"[cmd] Joints: pan={angles[0]:.1f} lift={angles[1]:.1f} elbow={angles[2]:.1f} flex={angles[3]:.1f} roll={angles[4]:.1f}{grip_val}"
+    )
+
+
+def handle_ik_command(args, log):
+    """Dashboard `/ik <right_cm> <fwd_cm> <up_cm>` — move arm to a board position."""
+    if len(args) != 3:
+        log("[cmd] Usage: /ik <right_cm> <fwd_cm> <up_cm>  (board coordinates)")
+        return
+    try:
+        board_pos = np.array([float(v) / 100 for v in args])
+    except ValueError:
+        log("[cmd] Invalid coordinates")
+        return
+    arm_pos = board_to_arm_full(board_pos)
+    log(
+        f"[cmd] Board: right={board_pos[0] * 100:.1f}cm fwd={board_pos[1] * 100:.1f}cm up={board_pos[2] * 100:.1f}cm"
+    )
+    log(
+        f"[cmd] Arm:   right={arm_pos[0] * 100:.1f}cm fwd={arm_pos[1] * 100:.1f}cm up={arm_pos[2] * 100:.1f}cm"
+    )
+    move_to_xyz(arm_pos)
+    log("[cmd] Done")
+
+
 # ---- Coordinate transforms ----
 # Physical world: +X = right, +Y = forward, +Z = up (relative to arm base on table)
 # URDF/IKPy:     +X ≈ up,    +Z ≈ forward,  +Y ≈ left
